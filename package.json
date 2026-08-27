@@ -1,19 +1,22 @@
 {
-  "name": "davinci-resolve-mcp",
+  "name": "davinci-resolve-cli",
   "version": "2.103.2",
-  "description": "NPM bootstrapper for the DaVinci Resolve MCP Server.",
+  "description": "Complete Bash-composable CLI and optional MCP servers for DaVinci Resolve.",
   "license": "MIT",
   "author": "Samuel Gursky <samgursky@gmail.com>",
-  "homepage": "https://github.com/samuelgursky/davinci-resolve-mcp#readme",
+  "homepage": "https://github.com/mixinDennisBarzanoffMixin/davinci-resolve-cli#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/samuelgursky/davinci-resolve-mcp.git"
+    "url": "git+https://github.com/mixinDennisBarzanoffMixin/davinci-resolve-cli.git"
   },
   "bugs": {
-    "url": "https://github.com/samuelgursky/davinci-resolve-mcp/issues"
+    "url": "https://github.com/mixinDennisBarzanoffMixin/davinci-resolve-cli/issues"
   },
   "type": "module",
   "bin": {
+    "davinci-resolve": "./bin/davinci-resolve.mjs",
+    "davinci-resolve-cli": "./bin/davinci-resolve.mjs",
+    "dvr": "./bin/davinci-resolve.mjs",
     "davinci-resolve-mcp": "./bin/davinci-resolve-mcp.mjs",
     "davinci-resolve-advanced-mcp": "./bin/davinci-resolve-advanced-mcp.mjs"
   },
@@ -38,12 +41,14 @@
     "src/**/*.py",
     "resolve-advanced/server/**/*.mjs",
     "resolve-advanced/server/**/*.py",
+    "resolve-advanced/cli.mjs",
     "resolve-advanced/vendor/**",
     "resolve-advanced/package.json",
     "resolve-advanced/README.md",
     "docs/**/*.md",
     "docs/reference/resolve_scripting_api.txt",
     "examples/**/*.md",
+    "examples/cli/**",
     "scripts/**/*.py",
     "install.py",
     "README.md",
@@ -54,12 +59,14 @@
     "CLAUDE.md"
   ],
   "scripts": {
-    "smoke": "node bin/davinci-resolve-mcp.mjs --help && node bin/davinci-resolve-mcp.mjs --version",
+    "smoke": "node bin/davinci-resolve.mjs --help && node bin/davinci-resolve.mjs --version && node bin/davinci-resolve-mcp.mjs --help",
     "pack:check": "npm pack --dry-run"
   },
   "keywords": [
     "davinci-resolve",
     "resolve",
+    "cli",
+    "bash",
     "mcp",
     "model-context-protocol",
     "video-editing",

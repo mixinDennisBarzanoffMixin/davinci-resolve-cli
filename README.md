@@ -1,18 +1,28 @@
-# DaVinci Resolve MCP Server
+# DaVinci Resolve CLI
 
 English | [简体中文](README.zh-CN.md)
 
-[![Version](https://img.shields.io/badge/version-2.103.2-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
-[![npm](https://img.shields.io/npm/v/davinci-resolve-mcp.svg?label=npm&color=CB3837)](https://www.npmjs.com/package/davinci-resolve-mcp)
+[![Version](https://img.shields.io/badge/upstream-2.103.2-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
 [![API Coverage](https://img.shields.io/badge/API%20Coverage-100%25-brightgreen.svg)](docs/reference/api-coverage.md)
-[![Tools](https://img.shields.io/badge/MCP%20Tools-36%20(353%20full)-blue.svg)](#server-modes)
-[![Advanced](https://img.shields.io/badge/Advanced%20(offline)-18%20tools-blueviolet.svg)](#server-modes)
+[![CLI](https://img.shields.io/badge/CLI-36%20compound%20%7C%20353%20granular-blue.svg)](#cli-surfaces)
+[![Advanced](https://img.shields.io/badge/Advanced-18%20tools%20%7C%20151%20actions-blueviolet.svg)](#cli-surfaces)
 [![Tested](https://img.shields.io/badge/Live%20Tested-93.6%25-green.svg)](docs/reference/api-coverage.md#test-results)
 [![DaVinci Resolve](https://img.shields.io/badge/DaVinci%20Resolve-18.5+-darkred.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-A Model Context Protocol (MCP) server that lets AI assistants control DaVinci Resolve Studio through the official Scripting API. It provides full API coverage plus guarded workflow helpers for editing, media pool organization, render setup, review markers, grading, Fusion, Fairlight, project lifecycle tasks, extension authoring, and source-safe media analysis.
+A complete, Bash-composable command-line environment for DaVinci Resolve. It
+exposes the upstream project's entire implementation directly: 36 guarded
+compound tools, 353 one-method granular tools, 18 offline advanced tools with
+151 actions, 14 prompts, and every concrete or templated resource. MCP remains
+available as an optional compatibility transport; it is no longer required to
+use Resolve automation from a terminal, script, cron job, or CI worker.
+
+Every ordinary command reserves stdout for result data. Requests can come from
+`key=value` arguments, dynamic flags, JSON, `@files`, or stdin; results can be
+JSON, JSONL, raw fields, or shell-quoted assignments. The CLI invokes the exact
+registered MCP tool objects/advanced handlers, so schemas, validation, safety
+gates, and new upstream tools do not fork into a second implementation.
 
 [![Local control panel](https://raw.githubusercontent.com/samuelgursky/davinci-resolve-mcp/main/docs/images/control-panel/01-overview.png)](docs/guides/control-panel.md)
 
@@ -21,18 +31,32 @@ A local browser control panel ships with the server for inspecting Resolve state
 ## Quick Start
 
 ```bash
-npx davinci-resolve-mcp setup
+git clone https://github.com/mixinDennisBarzanoffMixin/davinci-resolve-cli.git
+cd davinci-resolve-cli
+npm install
+npm link
+dvr setup --clients manual
+dvr doctor
 ```
 
 Before connecting, open DaVinci Resolve Studio and set **Preferences > General > External scripting using** to **Local**. (On the **free edition** that preference does not help — see [Free edition](#free-edition-in-app-bridge) below.) The npm launcher installs a managed copy under your user application-data directory, then runs the universal Python installer. The installer creates a virtual environment, detects Resolve paths, and can configure Claude Desktop, Claude Code, Cursor, VS Code, Windsurf, Zed, Continue, Cline, Roo Code, OpenCode, Codex CLI, and JetBrains IDEs.
 
-For source installs:
+Discover and call the live and offline surfaces:
 
 ```bash
-git clone https://github.com/samuelgursky/davinci-resolve-mcp.git
-cd davinci-resolve-mcp
-python install.py
+dvr tools --surface all | jq '.count'       # 389 live tools
+dvr actions timeline
+dvr project_manager get_current --raw name
+dvr timeline get_items track_type=video index=1 | jq '.items'
+dvr granular get_resolve_version_fields
+dvr advanced drx parse drxPath=/tmp/look.drx
+jq -n '{query:"SaveProject"}' | dvr resolve_control api_truth --input -
 ```
+
+See the [Bash CLI guide](docs/cli/bash-cli.md) for the full grammar, pipelines,
+exit codes, completions, confirmation flow, and MCP-to-CLI migration. The
+[batch CLI gap audit](docs/reference/batch-cli-gap-audit.md) records what the
+upstream terminal support covered—and what it was missing—before this fork.
 
 For platform paths, client-specific config, and manual setup, see [Installation and Configuration](docs/install.md).
 
@@ -105,16 +129,30 @@ venv/bin/python -m src.control_panel
 
 The command starts a loopback-only server and opens the control panel in your browser at a URL that carries a per-launch access token (`http://127.0.0.1:8765/#token=…`) — use that exact URL; the panel refuses requests without it. To have an AI coding agent do this, ask: **"Open the Resolve MCP control panel for this repo."** Agents should use `venv/bin/python -m src.control_panel` unless your Python environment is already active. Persisted analysis jobs refresh the local search index automatically after successful slices; the manual Build Index action is for rebuilding from existing reports.
 
-## Server Modes
+## CLI Surfaces
 
-| Mode | Entry point | Tools | Best for |
+| Surface | CLI form | Coverage | Resolve required |
+|---|---|---:|---|
+| Compound | `dvr TOOL ACTION ...` | 36 tools | Usually |
+| Granular | `dvr granular TOOL ...` | 353 tools | Usually |
+| Advanced | `dvr advanced TOOL ACTION ...` | 18 tools / 151 actions | No |
+| Prompts/resources | `dvr prompts`, `dvr resources` | 14 prompts / 37 resource entries | Depends on item |
+| Durable batch | `dvr batch ...` | analysis jobs + project specs | Depends on command |
+
+Use `dvr describe`, `dvr actions`, and the list commands as machine-readable
+discovery instead of copying a static command table. Generate shell completion
+with `dvr completion bash`, `zsh`, or `fish`.
+
+## MCP Compatibility Modes
+
+| Mode | CLI entry point | Tools | Best for |
 |------|-------------|-------|----------|
-| Compound | `src/server.py` | 36 | Default mode for most assistants. Related Resolve operations are grouped behind action parameters to keep context usage low. |
-| Full / granular | `src/server.py --full` or `src/resolve_mcp_server.py` | 353 | Power users who want one MCP tool per Resolve API method. |
+| Compound | `dvr server` | 36 | MCP clients that prefer grouped action tools. |
+| Full / granular | `dvr granular-server` or `dvr server --full` | 353 | MCP clients that want one tool per Resolve API method. |
 
 The compound server is recommended unless you specifically need the granular one-tool-per-method surface.
 
-### Advanced server — beyond the scripting API (optional, Node)
+### Advanced MCP server — beyond the scripting API (optional, Node)
 
 The same package ships a second, optional MCP server: **`davinci-resolve-advanced-mcp`** (bin
 `bin/davinci-resolve-advanced-mcp.mjs`). Where the Python server drives a *live* Resolve over the
@@ -289,6 +327,8 @@ For method-by-method status, see [API Coverage and Test Results](docs/reference/
 
 | Document | Use it for |
 |----------|------------|
+| [Bash CLI Guide](docs/cli/bash-cli.md) | Command grammar, JSON/stdin composition, output modes, pipelines, exit codes, confirmations, completion |
+| [Upstream Batch CLI Gap Audit](docs/reference/batch-cli-gap-audit.md) | Exact audit of the original terminal surface and the gaps closed by this fork |
 | [Installation and Configuration](docs/install.md) | Requirements, installer options, supported clients, server modes, manual config |
 | [API Coverage and Test Results](docs/reference/api-coverage.md) | Key stats, API coverage table, live-test status, full method reference |
 | [Kernel Action Coverage](docs/kernels/README.md) | Current guarded workflow action map |

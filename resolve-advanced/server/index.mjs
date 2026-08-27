@@ -26,46 +26,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-import { drpTool } from './tools/drp.mjs';
-import { drtTool } from './tools/drt.mjs';
-import { drxTool } from './tools/drx.mjs';
-import { offlineRefTool } from './tools/offline_ref.mjs';
-import { fusionTool } from './tools/fusion.mjs';
-import { audioPlanTool } from './tools/audio_plan.mjs';
-import { fairlightTool } from './tools/fairlight.mjs';
-import { audioTool } from './tools/audio.mjs';
-import { conformTool } from './tools/conform.mjs';
-import { projectDbTool } from './tools/project_db.mjs';
-import { projectReadTool } from './tools/project_read.mjs';
-import { colorTraceTool } from './tools/color_trace.mjs';
-import { capabilitiesTool } from './tools/capabilities.mjs';
-import { pipelineTool } from './tools/pipeline.mjs';
-import { deliverableTool } from './tools/deliverable.mjs';
-import { mediaTool } from './tools/media.mjs';
-import { editorialTool } from './tools/editorial.mjs';
-import { provenanceTool } from './tools/provenance.mjs';
+import { TOOLS } from './tools/index.mjs';
 import { logCapabilities } from './capabilities.mjs';
 
-const TOOLS = [
-  drpTool,
-  drtTool,
-  drxTool,
-  offlineRefTool,
-  fusionTool,
-  audioPlanTool,
-  fairlightTool,
-  audioTool,
-  conformTool,
-  projectDbTool,
-  projectReadTool,
-  colorTraceTool,
-  capabilitiesTool,
-  pipelineTool,
-  deliverableTool,
-  mediaTool,
-  editorialTool,
-  provenanceTool,
-];
+export { TOOLS } from './tools/index.mjs';
 const NAME = 'davinci-resolve-advanced-mcp';
 const VERSION = '0.0.0-dev';
 

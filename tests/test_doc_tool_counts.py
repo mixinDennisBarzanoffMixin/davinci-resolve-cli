@@ -4,7 +4,8 @@ Counts are computed STATICALLY (no imports, no deps — same posture as the othe
 guards so this runs in the dependency-light publish gate):
   - compound  = `@mcp.tool(` decorators in `src/server.py`
   - granular  = `@mcp.tool(` decorators across `src/granular/*.py`
-  - advanced  = entries in the `TOOLS` array in `resolve-advanced/server/index.mjs`
+  - advanced  = entries in the shared `TOOLS` registry in
+    `resolve-advanced/server/tools/index.mjs`
 
 Docs (README, README.zh-CN, install, contributing, SKILL, api-coverage,
 copilot-instructions) quote those counts by hand and drift. This asserts the docs still
@@ -57,10 +58,13 @@ def _count_decorators(*rel_globs: str) -> int:
 
 
 def _advanced_count() -> int:
-    idx = (ROOT / "resolve-advanced" / "server" / "index.mjs").read_text()
-    m = re.search(r"const TOOLS\s*=\s*\[([^\]]+)\]", idx)
+    idx = (ROOT / "resolve-advanced" / "server" / "tools" / "index.mjs").read_text()
+    m = re.search(r"export const TOOLS\s*=\s*Object\.freeze\(\[([^\]]+)\]\)", idx)
     if not m:
-        raise AssertionError("could not find the TOOLS array in resolve-advanced/server/index.mjs")
+        raise AssertionError(
+            "could not find the shared TOOLS registry in "
+            "resolve-advanced/server/tools/index.mjs"
+        )
     return len([t for t in m.group(1).split(",") if t.strip()])
 
 
@@ -75,8 +79,8 @@ class DocToolCountsDriftTest(unittest.TestCase):
             ("README.md", f"{adv} tools:"),
             ("README.md", f"**{comp}** compound / **{gran}** granular"),
             ("README.md", f"Advanced (offline) tools | **{adv}**"),
-            ("README.md", f"Advanced%20(offline)-{adv}%20tools"),
-            ("README.md", f"MCP%20Tools-{comp}%20({gran}%20full)"),
+            ("README.md", f"Advanced-{adv}%20tools%20%7C%20151%20actions"),
+            ("README.md", f"CLI-{comp}%20compound%20%7C%20{gran}%20granular"),
             ("README.zh-CN.md", f"MCP%20Tools-{comp}%20({gran}%20full)"),
             ("README.zh-CN.md", f"`src/resolve_mcp_server.py` | {gran} |"),
             ("README.zh-CN.md", f"**{comp}** 复合 / **{gran}** 细粒度"),

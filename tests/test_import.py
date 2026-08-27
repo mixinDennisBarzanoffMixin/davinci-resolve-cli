@@ -132,10 +132,14 @@ class McpSdkPinTest(unittest.TestCase):
 
 def test_npm_package_metadata():
     package = json.loads((PROJECT_ROOT / "package.json").read_text())
-    assert package["name"] == "davinci-resolve-mcp"
+    assert package["name"] == "davinci-resolve-cli"
     assert package["version"] == _string_assignment(PROJECT_ROOT / "install.py", "VERSION")
     assert package["bin"]["davinci-resolve-mcp"] == "./bin/davinci-resolve-mcp.mjs"
+    assert package["bin"]["davinci-resolve"] == "./bin/davinci-resolve.mjs"
+    assert package["bin"]["davinci-resolve-cli"] == "./bin/davinci-resolve.mjs"
+    assert package["bin"]["dvr"] == "./bin/davinci-resolve.mjs"
     assert (PROJECT_ROOT / "bin" / "davinci-resolve-mcp.mjs").exists()
+    assert (PROJECT_ROOT / "bin" / "davinci-resolve.mjs").exists()
 
 
 def test_package_lock_in_sync():

@@ -6,6 +6,10 @@ ignored scratch folders such as `docs/_scratch/`.
 
 ## Operating References
 
+- [Bash CLI Guide](cli/bash-cli.md) — complete command grammar, JSON/stdin
+  composition, outputs, exit codes, confirmations, and shell completion.
+- [Upstream Batch CLI Gap Audit](reference/batch-cli-gap-audit.md) — what the
+  original narrow terminal runner covered and what the full CLI adds.
 - [Installation and Configuration](install.md) — requirements, supported MCP
   clients, installer options, server modes, and manual configuration.
 - [API Coverage and Test Results](reference/api-coverage.md) — current stats,

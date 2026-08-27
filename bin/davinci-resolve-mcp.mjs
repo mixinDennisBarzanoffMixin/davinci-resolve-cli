@@ -52,6 +52,8 @@ Usage:
   davinci-resolve-mcp server [server.py options]
   davinci-resolve-mcp control-panel [control panel options]
   davinci-resolve-mcp batch <plan|run|status|list|resume|cancel> [options]
+  davinci-resolve-mcp cli <tool|command> [arguments]
+  davinci-resolve-mcp advanced <tool> <action> [arguments]
   davinci-resolve-mcp --version
   davinci-resolve-mcp --help
 
@@ -422,15 +424,33 @@ function commandBatch(args) {
   run(command, commandArgs, { cwd: root });
 }
 
+function commandCli(args) {
+  const root = syncManagedInstall(installRoot());
+  const python = venvPython(root) || findSupportedPython();
+  maybeWarnAbiRisk(python);
+  const [command, ...commandArgs] = pythonCommandLine(python, ["-m", "src.cli", ...args]);
+  run(command, commandArgs, { cwd: root });
+}
+
+function commandAdvanced(args) {
+  const entry = path.join(PACKAGE_ROOT, "resolve-advanced", "cli.mjs");
+  run(process.execPath, [entry, ...args], { cwd: process.cwd() });
+}
+
 function main() {
   const argv = process.argv.slice(2);
+  const cliEntry = process.env.DAVINCI_RESOLVE_CLI_ENTRY === "1";
   // No args → run the MCP stdio server. Anything printed to stdout would
   // otherwise be parsed as JSON-RPC by MCP clients and break the connection.
-  const [command = "server", ...args] = argv;
+  const [command = cliEntry ? "cli" : "server", ...args] = argv;
 
   try {
     if (command === "--help" || command === "-h" || command === "help") {
-      console.log(usage());
+      if (cliEntry) {
+        commandCli(["--help"]);
+      } else {
+        console.log(usage());
+      }
       return;
     }
     if (command === "--version" || command === "-v" || command === "version") {
@@ -449,12 +469,32 @@ function main() {
       commandServer(args);
       return;
     }
+    if (command === "mcp" || command === "mcp-server") {
+      commandServer(args);
+      return;
+    }
+    if (command === "granular-server") {
+      commandServer(["--full", ...args]);
+      return;
+    }
     if (command === "control-panel" || command === "control_panel") {
       commandControlPanel(args);
       return;
     }
     if (command === "batch") {
       commandBatch(args);
+      return;
+    }
+    if (command === "advanced") {
+      commandAdvanced(args);
+      return;
+    }
+    if (command === "cli") {
+      commandCli(args);
+      return;
+    }
+    if (cliEntry) {
+      commandCli(argv);
       return;
     }
 
