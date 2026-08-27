@@ -18,6 +18,19 @@ compound tools, 353 one-method granular tools, 18 offline advanced tools with
 available as an optional compatibility transport; it is no longer required to
 use Resolve automation from a terminal, script, cron job, or CI worker.
 
+This repository is a public, CLI-first fork of
+[samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp).
+It preserves the upstream MCP transports for compatibility, while making the
+`dvr` command and ordinary Bash pipelines the primary interface. Upstream
+authorship and the MIT license are preserved in the repository history and
+license files.
+
+“100%” in this repository means complete coverage of Blackmagic's documented
+Resolve scripting API and of the upstream project's exposed surfaces—not every
+feature in Resolve's UI or its separate FusionScript and extension APIs. See the
+[Resolve Workflow Gap Audit](docs/reference/resolve-workflow-gaps.md) for the
+missing workflows and the build order, led by animated captions and transitions.
+
 Every ordinary command reserves stdout for result data. Requests can come from
 `key=value` arguments, dynamic flags, JSON, `@files`, or stdin; results can be
 JSON, JSONL, raw fields, or shell-quoted assignments. The CLI invokes the exact
@@ -291,7 +304,7 @@ cheaper to read it here than to discover it mid-project.
 | Not supported | Why, and what you get instead |
 |---|---|
 | **Choosing the best take** | Performance is most of what makes a take right, and none of it is measurable from a waveform or a transcript. `rank_takes` ranks *fluency* — fillers, restarts, script coverage — and says so in every response. The take that plays is regularly the least fluent one, because the hesitation is often the acting. Use it to find the clean safety take, not to choose the read. |
-| **Cutting to music** | No beat or downbeat detection yet. Speech-driven tools will read a music bed as one long region and are the wrong instrument for it. |
+| **Finishing music cuts** | `edit_engine plan_beat_cuts` detects beats, bars, and phrases when `librosa` is installed, but it produces a reviewable cut plan rather than judging or committing a finished music edit for you. |
 | **Judging a cut** | Nothing here has an opinion about whether an edit is good. Every destructive action is plan → review → confirm for that reason. |
 | **Replacing an editor** | The output is a first-pass assembly, in the assistant-editor sense: ingest, sync, organize, string out, flag problems. It is a starting point you cut, not a finished cut. Defaults are deliberately **generous** — a first assembly is supposed to run long, because trimming is fast and visible while recovering discarded material is slow and invisible. |
 | **Modifying your source media** | By design and without exception — see below. |
