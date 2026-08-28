@@ -1,4 +1,4 @@
-# DaVinci Resolve MCP 服务器
+# DaVinci Resolve CLI
 
 [English](README.md) | 简体中文
 
@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/davinci-resolve-mcp.svg?label=npm&color=CB3837)](https://www.npmjs.com/package/davinci-resolve-mcp)
 [![API Coverage](https://img.shields.io/badge/API%20Coverage-100%25-brightgreen.svg)](docs/reference/api-coverage.md)
 [![Tools](https://img.shields.io/badge/MCP%20Tools-36%20(353%20full)-blue.svg)](#服务器模式)
-[![Advanced](https://img.shields.io/badge/Advanced%20(offline)-18%20tools-blueviolet.svg)](#服务器模式)
+[![Advanced](https://img.shields.io/badge/Advanced%20(offline)-19%20tools-blueviolet.svg)](#服务器模式)
 [![Tested](https://img.shields.io/badge/Live%20Tested-93.6%25-green.svg)](docs/reference/api-coverage.md#test-results)
 [![DaVinci Resolve](https://img.shields.io/badge/DaVinci%20Resolve-18.5+-darkred.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
@@ -14,7 +14,9 @@
 
 > 本翻译对应 v2.103.2 版 README。如与英文原版有出入，以 [英文原版](README.md) 为准。
 
-一个 Model Context Protocol (MCP) 服务器，让 AI 助手通过官方脚本 API 控制 DaVinci Resolve Studio（达芬奇）。它提供完整的 API 覆盖，外加带护栏的工作流助手，涵盖剪辑、媒体池整理、渲染设置、审阅标记、调色、Fusion、Fairlight、项目生命周期任务、扩展开发，以及不碰源媒体的媒体分析。
+一个完整、可在 Bash 中组合的 DaVinci Resolve 命令行环境。此仓库是
+[samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp)
+的公开 CLI 优先 fork；保留 MCP 传输层用于兼容，但主要界面是 `dvr` 命令和普通 shell 管线。
 
 [![本地控制面板](https://raw.githubusercontent.com/samuelgursky/davinci-resolve-mcp/main/docs/images/control-panel/01-overview.png)](docs/guides/control-panel.md)
 
@@ -88,7 +90,7 @@ venv/bin/python -m src.control_panel
 
 ### Advanced 服务器——超出脚本 API 的部分（可选，Node）
 
-同一个包还带了第二个可选的 MCP 服务器：**`davinci-resolve-advanced-mcp`**（可执行文件 `bin/davinci-resolve-advanced-mcp.mjs`）。Python 服务器通过官方脚本 API 驱动一个*活着的* Resolve，而 advanced 服务器做的是 API **做不到**的事——直接读写 Resolve 的**文件**（`.drp` / `.drt` / `.drx`），在**没有 Resolve 运行**的情况下做数据库/XML 层面的修改，所以云端和本地都能跑。共 18 个工具：`drp`、`drt`、`drx`（逐片段调色编解码，**外加一套确定性的离线调色/QC 目录**——同机位 + 跨机位肤色匹配（v2 肤色线指标）+ B-roll + 中性色块白平衡匹配、参考帧匹配、饱和度/黑平衡、对比度归一化、ASC CDL 导入、无损调色迁移 + 季度风格创作、命名 LUT 挂载、示波器读数 + 意图标签、调色验证、显示参考的帧提取、广播安全 QC）、`offline_ref`、`conform`（帧级基准的套底/重链 QC + 血缘追踪）、`color_trace`（重新套底后带着调色走）、`fusion`、`audio_plan`、`fairlight`（总线路由）、`audio`、`project_read`、`project_db`、`pipeline`（**以数据库为真源的管线**：把 YAML 项目规格编译成规范化 SQLite 数据库，再按阶段执行，带关卡、溯源和"意图↔实际"漂移检测）、`capabilities`、`deliverable`（交付 QC / 合规）、`media`（媒体前端 / AE 摄入）、`editorial`（剪辑完整性 / 变更清单）、`provenance`（溯源 / 审计 / 单集报告）。它还可以**作为库**使用（可导入的引擎 API），不只是当服务器起。
+同一个包还带了第二个可选的 MCP 服务器：**`davinci-resolve-advanced-mcp`**（可执行文件 `bin/davinci-resolve-advanced-mcp.mjs`）。Python 服务器通过官方脚本 API 驱动一个*活着的* Resolve，而 advanced 服务器做的是 API **做不到**的事——直接读写 Resolve 的**文件**（`.drp` / `.drt` / `.drx`），在**没有 Resolve 运行**的情况下做数据库/XML 层面的修改，所以云端和本地都能跑。共 19 个工具：`drp`、`drt`、`drx`（逐片段调色编解码，**外加一套确定性的离线调色/QC 目录**——同机位 + 跨机位肤色匹配（v2 肤色线指标）+ B-roll + 中性色块白平衡匹配、参考帧匹配、饱和度/黑平衡、对比度归一化、ASC CDL 导入、无损调色迁移 + 季度风格创作、命名 LUT 挂载、示波器读数 + 意图标签、调色验证、显示参考的帧提取、广播安全 QC）、`offline_ref`、`conform`（帧级基准的套底/重链 QC + 血缘追踪）、`color_trace`（重新套底后带着调色走）、`fusion`、`audio_plan`、`fairlight`（总线路由）、`audio`、`project_read`、`project_db`、`pipeline`（**以数据库为真源的管线**：把 YAML 项目规格编译成规范化 SQLite 数据库，再按阶段执行，带关卡、溯源和"意图↔实际"漂移检测）、`capabilities`、`deliverable`（交付 QC / 合规）、`media`（媒体前端 / AE 摄入）、`editorial`（剪辑完整性 / 变更清单）、`provenance`（溯源 / 审计 / 单集报告）、`captions`（字幕互换与原生字幕 DRT 创作）。它还可以**作为库**使用（可导入的引擎 API），不只是当服务器起。
 
 DRX 调色写入**针对 Resolve Studio 做过实机校准**：调色参数默认采用 Resolve 屏幕面板上的单位（`space: 'ui' | 'drx'`），结构性写入（Power Window、限定器、HDR 分区、HSL 曲线、ColorSlice、模糊/键控/运动特效）都经过面板回读验证——每个控件的状态见 `resolve-advanced/vendor/drx-parameters/CALIBRATION-STATUS.md`。它还补上了一个 UI 独占的缺口：**程序化"整理节点图"**（`drx` 的 `relayout` 处理单个片段，`project_db` 的 `relayout_node_graphs` 处理整个项目）——节点布局整理好，调色内容逐字节保留。
 
@@ -197,7 +199,7 @@ DRX 调色写入**针对 Resolve Studio 做过实机校准**：调色参数默�
 | 指标 | 数值 |
 |------|------|
 | MCP 工具 | **36** 复合 / **353** 细粒度（实时服务器） |
-| Advanced（离线）工具 | **18**——.drp/.drt/.drx + 数据库创作，无需 Resolve 运行 |
+| Advanced（离线）工具 | **19**——.drp/.drt/.drx + 数据库/字幕创作，无需 Resolve 运行 |
 | 内核 action | 9 个复合工具下 **136** 个带护栏的工作流 action |
 | API 方法覆盖 | **361/361**（100%） |
 | 实机测试方法数 | **338/361**（93.6%） |

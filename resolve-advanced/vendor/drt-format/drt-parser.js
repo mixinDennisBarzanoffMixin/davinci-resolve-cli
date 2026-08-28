@@ -94,6 +94,50 @@ function extractTracks(seqXml, trackVecTag, trackTagBase, trackType) {
   return tracks;
 }
 
+function decodeXml(value) {
+  if (value === null || value === undefined) return value;
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function extractSubtitleTracks(seqXml) {
+  const tracks = [];
+  const vecMatch = seqXml.match(/<SubtitleTrackVec>([\s\S]*?)<\/SubtitleTrackVec>/);
+  if (!vecMatch) return tracks;
+  const trackRe = /<(Sm2TiSubtitleTrack|Sm2TiTrack)\b[^>]*?DbId="([^"]+)"[^>]*>([\s\S]*?)<\/\1>/g;
+  let trackMatch;
+  while ((trackMatch = trackRe.exec(vecMatch[1])) !== null) {
+    const trackInner = trackMatch[3];
+    const clips = [];
+    const clipRe = /<Sm2TiGenerator\b[^>]*?DbId="([^"]+)"[^>]*>([\s\S]*?)<\/Sm2TiGenerator>/g;
+    let clipMatch;
+    while ((clipMatch = clipRe.exec(trackInner)) !== null) {
+      const clipInner = clipMatch[2];
+      const prettyType = extractScalar(clipInner, 'PrettyType');
+      if (prettyType && prettyType !== 'Subtitle') continue;
+      clips.push({
+        clipId: clipMatch[1],
+        // buildXmlElement indents every line of an array child. Undo that
+        // structural indentation inside multiline subtitle names so an
+        // authored caption round-trips as the original text.
+        text: decodeXml(extractScalar(clipInner, 'Name') || '').replace(/\n[ \t]+/g, '\n'),
+        startFrame: extractInt(clipInner, 'Start'),
+        durationFrames: extractInt(clipInner, 'Duration'),
+      });
+    }
+    tracks.push({
+      trackId: trackMatch[2],
+      name: decodeXml(extractScalar(trackInner, 'UserDefinedName') || 'Subtitle Track'),
+      clips,
+    });
+  }
+  return tracks;
+}
+
 function parseSeqContainer(seqXml, sequenceName) {
   return {
     name: extractScalar(seqXml, 'Name') || sequenceName,
@@ -109,6 +153,7 @@ function parseSeqContainer(seqXml, sequenceName) {
     })(),
     videoTracks: extractTracks(seqXml, 'VideoTrackVec', 'Sm2TiVideoTrack', 'video'),
     audioTracks: extractTracks(seqXml, 'AudioTrackVec', 'Sm2TiAudioTrack', 'audio'),
+    subtitleTracks: extractSubtitleTracks(seqXml),
   };
 }
 

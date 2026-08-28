@@ -79,7 +79,7 @@ class DocToolCountsDriftTest(unittest.TestCase):
             ("README.md", f"{adv} tools:"),
             ("README.md", f"**{comp}** compound / **{gran}** granular"),
             ("README.md", f"Advanced (offline) tools | **{adv}**"),
-            ("README.md", f"Advanced-{adv}%20tools%20%7C%20151%20actions"),
+            ("README.md", f"Advanced-{adv}%20tools%20%7C%20154%20actions"),
             ("README.md", f"CLI-{comp}%20compound%20%7C%20{gran}%20granular"),
             ("README.zh-CN.md", f"MCP%20Tools-{comp}%20({gran}%20full)"),
             ("README.zh-CN.md", f"`src/resolve_mcp_server.py` | {gran} |"),

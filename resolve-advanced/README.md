@@ -68,11 +68,11 @@ await call('readback', {
 });
 ```
 
-## Tools (18)
+## Tools (19)
 
 `drp` · `drt` · `drx` · `offline_ref` · `conform` · `color_trace` · `fusion` · `audio` ·
 `audio_plan` · `fairlight` · `project_db` · `project_read` · `pipeline` · `capabilities` ·
-`deliverable` · `media` · `editorial` · `provenance`
+`deliverable` · `media` · `editorial` · `provenance` · `captions`
 
 Each dispatches on an `action`. Highlights:
 
@@ -108,6 +108,10 @@ Each dispatches on an `action`. Highlights:
   `marker_roundtrip`.
 - **`provenance`** — provenance / audit: `gallery_lineage`, `grade_provenance` ("why is this graded this
   way"), `cdl_export` (+ `cdl_diff`, round-trip asserted), `revision_tracking`, `episode_report`.
+- **`captions`** — Bash-friendly caption interchange: `parse` SRT/VTT/JSON/word timings,
+  `write` SRT/VTT/JSON to a file or stdout, and `compose_native` to author a standalone
+  `.drt` with a native subtitle track. The DRT is structurally round-tripped here; import it
+  as a new timeline and verify it in the target Resolve build before production use.
 
 ### Grading / QC catalog (`drx` actions — all local, deterministic, no Resolve)
 

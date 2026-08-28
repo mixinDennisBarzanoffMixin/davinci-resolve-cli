@@ -5,7 +5,7 @@ English | [简体中文](README.zh-CN.md)
 [![Version](https://img.shields.io/badge/upstream-2.103.2-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
 [![API Coverage](https://img.shields.io/badge/API%20Coverage-100%25-brightgreen.svg)](docs/reference/api-coverage.md)
 [![CLI](https://img.shields.io/badge/CLI-36%20compound%20%7C%20353%20granular-blue.svg)](#cli-surfaces)
-[![Advanced](https://img.shields.io/badge/Advanced-18%20tools%20%7C%20151%20actions-blueviolet.svg)](#cli-surfaces)
+[![Advanced](https://img.shields.io/badge/Advanced-19%20tools%20%7C%20154%20actions-blueviolet.svg)](#cli-surfaces)
 [![Tested](https://img.shields.io/badge/Live%20Tested-93.6%25-green.svg)](docs/reference/api-coverage.md#test-results)
 [![DaVinci Resolve](https://img.shields.io/badge/DaVinci%20Resolve-18.5+-darkred.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
@@ -13,8 +13,8 @@ English | [简体中文](README.zh-CN.md)
 
 A complete, Bash-composable command-line environment for DaVinci Resolve. It
 exposes the upstream project's entire implementation directly: 36 guarded
-compound tools, 353 one-method granular tools, 18 offline advanced tools with
-151 actions, 14 prompts, and every concrete or templated resource. MCP remains
+compound tools, 353 one-method granular tools, 19 offline advanced tools with
+154 actions, 14 prompts, and every concrete or templated resource. MCP remains
 available as an optional compatibility transport; it is no longer required to
 use Resolve automation from a terminal, script, cron job, or CI worker.
 
@@ -65,6 +65,25 @@ dvr granular get_resolve_version_fields
 dvr advanced drx parse drxPath=/tmp/look.drx
 jq -n '{query:"SaveProject"}' | dvr resolve_control api_truth --input -
 ```
+
+Caption and transition workflows are first-class CLI actions:
+
+```bash
+# SRT/VTT/JSON → a standalone DRT authored with a native subtitle track
+dvr advanced captions compose_native inputPath=captions.srt outputPath=captions.drt frameRate=24
+
+# Timed words → editable Fusion title overlays on V3 with Text+ pop keyframes
+dvr edit_engine create_animated_captions --input @caption-request.json track_index=3 preset=pop
+
+# Inspect existing transitions with cut/handle context; deletion is confirm-gated
+dvr timeline transition_report track_type=video track_index=1
+```
+
+`caption-request.json` is an object containing `words` (timed word objects) or
+`blocks` (timed caption blocks). Animated captions are Fusion title overlays,
+not an accessibility subtitle stream; keep or import the native caption track
+when delivery requires one. Resolve's public API still cannot create a live
+transition or attach its native word-aware Animated effect to a subtitle track.
 
 See the [Bash CLI guide](docs/cli/bash-cli.md) for the full grammar, pipelines,
 exit codes, completions, confirmation flow, and MCP-to-CLI migration. The
@@ -148,7 +167,7 @@ The command starts a loopback-only server and opens the control panel in your br
 |---|---|---:|---|
 | Compound | `dvr TOOL ACTION ...` | 36 tools | Usually |
 | Granular | `dvr granular TOOL ...` | 353 tools | Usually |
-| Advanced | `dvr advanced TOOL ACTION ...` | 18 tools / 151 actions | No |
+| Advanced | `dvr advanced TOOL ACTION ...` | 19 tools / 154 actions | No |
 | Prompts/resources | `dvr prompts`, `dvr resources` | 14 prompts / 37 resource entries | Depends on item |
 | Durable batch | `dvr batch ...` | analysis jobs + project specs | Depends on command |
 
@@ -171,7 +190,7 @@ The same package ships a second, optional MCP server: **`davinci-resolve-advance
 `bin/davinci-resolve-advanced-mcp.mjs`). Where the Python server drives a *live* Resolve over the
 sanctioned scripting API, the advanced server does what the API **can't** — it reads and edits Resolve
 **files** (`.drp` / `.drt` / `.drx`) and applies DB/XML-level changes **with no Resolve running**, so it
-runs cloud *or* local. 18 tools: `drp`, `drt`, `drx` (per-clip grade codec **plus a deterministic,
+runs cloud *or* local. 19 tools: `drp`, `drt`, `drx` (per-clip grade codec **plus a deterministic,
 offline grading/QC catalog** — within-camera + cross-camera skin (v2 skin-line metric) + b-roll +
 neutral-patch WB matching, match-to-reference, saturation/black-balance, contrast-normalize, ASC CDL
 import, lossless grade-transfer + season-look authoring, named-LUT attach, scope reads + intent tags,
@@ -181,7 +200,8 @@ verify-grade, display-referred frame extraction, broadcast-legal QC), `offline_r
 (a **DB-as-truth pipeline**: compile YAML project specs into a canonical SQLite DB, then run stages with
 gates, provenance, and intent↔actual drift detection), `capabilities`, `deliverable` (deliverable QC /
 compliance), `media` (media front-end / AE ingest), `editorial` (editorial integrity / changelist),
-`provenance` (provenance / audit / episode report). It can also be consumed **as a
+`provenance` (provenance / audit / episode report), and `captions` (SRT/VTT/JSON
+interchange plus native subtitle-track DRT authoring). It can also be consumed **as a
 library** (importable engine API), not just spawned as a server.
 
 DRX grade writes are **live-calibrated against Resolve Studio**: grade params take Resolve's
@@ -325,7 +345,7 @@ The default server is a local stdio process launched by your MCP client; it does
 | Metric | Value |
 |--------|-------|
 | MCP Tools | **36** compound / **353** granular (live server) |
-| Advanced (offline) tools | **18** — .drp/.drt/.drx + DB authoring, no Resolve running |
+| Advanced (offline) tools | **19** — .drp/.drt/.drx + DB/caption authoring, no Resolve running |
 | Kernel Actions | **136** guarded workflow actions across 9 compound tools |
 | API Methods Covered | **361/361** (100%) |
 | Methods Live Tested | **338/361** (93.6%) |

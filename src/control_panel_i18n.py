@@ -526,7 +526,7 @@ ZH_CN_TRANSLATIONS = {
     "Needs torch + ffmpeg. Uses laion/clap-htsat-unfused (~600 MB, downloads on first use); the laion_clap package works as an alternative backend.": "需要 torch 和 ffmpeg。默认使用 laion/clap-htsat-unfused（约 600 MB，首次使用时下载）；也可使用 laion_clap 包作为替代后端。",
     "The optional offline Node sibling (": "可选的离线 Node 配套服务（",
     ") edits Resolve files (": "）可编辑 Resolve 文件（",
-    ") and patches the project DB — no running Resolve required. The core is pure-JS and always available; a few features need user-installed helpers, shown live below. Full 18-tool catalog: Docs → Advanced Server.": "）并修改项目数据库，无需运行 Resolve。核心功能由纯 JavaScript 实现并始终可用；少数功能需要用户安装辅助程序，其状态显示在下方。完整的 18 项工具目录见：文档 → 高级服务器。",
+    ") and patches the project DB — no running Resolve required. The core is pure-JS and always available; a few features need user-installed helpers, shown live below. Full 19-tool catalog: Docs → Advanced Server.": "）并修改项目数据库，无需运行 Resolve。核心功能由纯 JavaScript 实现并始终可用；少数功能需要用户安装辅助程序，其状态显示在下方。完整的 19 项工具目录见：文档 → 高级服务器。",
     "checking…": "正在检查…",
     "lineage sidecar": "沿袭记录旁车文件",
     "— the content-hashed snapshot store the advanced server's": "是高级服务器的内容哈希快照存储；高级服务器的",

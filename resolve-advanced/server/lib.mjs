@@ -78,6 +78,8 @@ export { parseEDL, parseOTIO, parseXMEMLEvents, parseInterchange, diffChangelist
 
 // ── provenance / audit (Cluster P) — compute cores ─────────────────────
 export { provenanceTool } from './tools/provenance.mjs';
+export { captionsTool } from './tools/captions.mjs';
+export { groupWords, normalizeCues, parseCaptionSource, renderCaptions, cuesToSubtitleClips } from './captions.mjs';
 export { galleryLineage, makeStillLabel, validateStillLabel, gradeProvenance, cdlExport, cdlDiff, revisionHistory, episodeReport } from './provenance-audit.mjs';
 
 // ── mcp — the stdio server entry (the thin shell over the above) ───────────────

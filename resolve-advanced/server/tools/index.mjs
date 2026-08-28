@@ -23,6 +23,7 @@ import { deliverableTool } from './deliverable.mjs';
 import { mediaTool } from './media.mjs';
 import { editorialTool } from './editorial.mjs';
 import { provenanceTool } from './provenance.mjs';
+import { captionsTool } from './captions.mjs';
 
 export const TOOLS = Object.freeze([
   drpTool,
@@ -43,6 +44,7 @@ export const TOOLS = Object.freeze([
   mediaTool,
   editorialTool,
   provenanceTool,
+  captionsTool,
 ]);
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));

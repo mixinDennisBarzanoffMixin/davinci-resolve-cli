@@ -1207,6 +1207,7 @@ _destructive_hook.register_preference_provider(_destructive_preference_provider)
 # a version. Keep in sync with the _issue_confirm_token call sites.
 _TOKEN_GATED_DESTRUCTIVE_ACTIONS = frozenset({
     ("timeline", "delete_track"),
+    ("timeline", "delete_transition"),
     ("timeline", "apply_cuts"),
     ("timeline", "ripple_insert"),
     # Catastrophic media-pool deletes (EX3): irreversibly destroy clips/folders/
@@ -4369,6 +4370,235 @@ def _timeline_items_by_ids(tl, ids, track_types=("video", "audio", "subtitle")):
                 if _safe_timeline_item_id(item) in ids_set:
                     found.append(item)
     return found
+
+
+def _timeline_transition_evidence(item) -> Tuple[bool, Dict[str, Any]]:
+    """Conservatively identify a transition TimelineItem.
+
+    Resolve has no transition class or ``GetTransition`` method. Live testing
+    on Resolve 21.0.4 established the only useful public discriminator: a
+    transition is enumerated as a TimelineItem, has an empty keyless
+    ``GetProperty`` map, no MediaPoolItem, and no Fusion composition. Refuse to
+    classify an item when any of those reads fails; a false negative is safer
+    than deleting an ordinary title/generator as a transition.
+    """
+    evidence: Dict[str, Any] = {
+        "empty_property_map": False,
+        "has_media_pool_item": None,
+        "fusion_comp_count": None,
+    }
+    try:
+        try:
+            properties = item.GetProperty()
+        except TypeError:
+            properties = item.GetProperty("")
+    except Exception as exc:
+        evidence["classification_error"] = f"GetProperty failed: {exc}"
+        return False, evidence
+    evidence["empty_property_map"] = isinstance(properties, dict) and not properties
+    if not evidence["empty_property_map"]:
+        return False, evidence
+
+    try:
+        media_pool_item = item.GetMediaPoolItem()
+    except Exception as exc:
+        evidence["classification_error"] = f"GetMediaPoolItem failed: {exc}"
+        return False, evidence
+    evidence["has_media_pool_item"] = media_pool_item is not None
+    if media_pool_item is not None:
+        return False, evidence
+
+    try:
+        fusion_count = int(item.GetFusionCompCount() or 0)
+    except Exception as exc:
+        evidence["classification_error"] = f"GetFusionCompCount failed: {exc}"
+        return False, evidence
+    evidence["fusion_comp_count"] = fusion_count
+    return fusion_count == 0, evidence
+
+
+def _timeline_item_max_extension(item, method_name: str) -> Optional[int]:
+    """Read a clip's documented maximum trim extension, in timeline frames."""
+    try:
+        method = getattr(item, method_name)
+        try:
+            value = method(False)
+        except TypeError:
+            value = method()
+        return _frame_int(value)
+    except Exception:
+        return None
+
+
+def _timeline_transition_row(item, track_type: str, track_index: int,
+                             track_items: List[Any]) -> Dict[str, Any]:
+    start = _frame_int(item.GetStart())
+    end = _frame_int(item.GetEnd())
+    duration = _timeline_item_duration(item, start, end)
+
+    # A normal edit has two non-transition clips sharing a cut inside the
+    # transition's visible range. Do not infer alignment from the transition
+    # range: Resolve exposes neither alignment nor transition parameters.
+    clips = []
+    for candidate in track_items:
+        if candidate is item:
+            continue
+        is_transition, _ = _timeline_transition_evidence(candidate)
+        if is_transition:
+            continue
+        candidate_start = _frame_int(candidate.GetStart())
+        candidate_end = _frame_int(candidate.GetEnd())
+        clips.append((candidate, candidate_start, candidate_end))
+
+    cut_candidates = []
+    if start is not None and end is not None:
+        for left, left_start, left_end in clips:
+            if left_end is None or not (start <= left_end <= end):
+                continue
+            for right, right_start, right_end in clips:
+                if right is left or right_start != left_end:
+                    continue
+                cut_candidates.append((left_end, left, left_start, left_end,
+                                       right, right_start, right_end))
+    cut_info = None
+    warnings: List[str] = []
+    if cut_candidates:
+        midpoint = ((start or 0) + (end or 0)) / 2.0
+        cut, left, left_start, left_end, right, right_start, right_end = min(
+            cut_candidates, key=lambda row: abs(row[0] - midpoint))
+        outgoing_needed = cut - start if start is not None else None
+        incoming_needed = end - cut if end is not None else None
+        outgoing_available = _timeline_item_max_extension(left, "GetRightOffset")
+        incoming_available = _timeline_item_max_extension(right, "GetLeftOffset")
+        handle_warnings = []
+        if (outgoing_available is not None and outgoing_needed is not None
+                and outgoing_available < outgoing_needed):
+            handle_warnings.append(
+                f"Outgoing clip reports {outgoing_available} handle frames; "
+                f"transition uses {outgoing_needed}."
+            )
+        if (incoming_available is not None and incoming_needed is not None
+                and incoming_available < incoming_needed):
+            handle_warnings.append(
+                f"Incoming clip reports {incoming_available} handle frames; "
+                f"transition uses {incoming_needed}."
+            )
+        warnings.extend(handle_warnings)
+        cut_info = {
+            "frame": cut,
+            "left": {
+                "id": _safe_timeline_item_id(left),
+                "name": _safe_timeline_item_name(left),
+                "start": left_start,
+                "end": left_end,
+                "available_outgoing_handle_frames": outgoing_available,
+                "required_outgoing_handle_frames": outgoing_needed,
+            },
+            "right": {
+                "id": _safe_timeline_item_id(right),
+                "name": _safe_timeline_item_name(right),
+                "start": right_start,
+                "end": right_end,
+                "available_incoming_handle_frames": incoming_available,
+                "required_incoming_handle_frames": incoming_needed,
+            },
+            "handle_warnings": handle_warnings,
+        }
+    else:
+        warnings.append(
+            "Could not identify two ordinary clips sharing a cut inside this "
+            "transition; neighbor and handle context is unavailable."
+        )
+
+    return {
+        "id": _safe_timeline_item_id(item),
+        "name": _safe_timeline_item_name(item),
+        "track_type": track_type,
+        "track_index": track_index,
+        "start": start,
+        "end": end,
+        "duration": duration,
+        "cut": cut_info,
+        "warnings": warnings,
+        "classification": {
+            "confidence": "high",
+            "basis": "empty GetProperty map, no MediaPoolItem, zero Fusion comps",
+        },
+    }
+
+
+def _timeline_transition_report(tl, p: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Enumerate transition TimelineItems with cut-neighbor and handle context."""
+    p = p or {}
+    requested_type = p.get("track_type")
+    if requested_type not in (None, "video", "audio"):
+        return _err(
+            "track_type must be 'video' or 'audio'",
+            code="INVALID_TRACK_TYPE", category="invalid_input",
+        )
+    requested_index = p.get("track_index", p.get("index"))
+    if requested_index is not None:
+        try:
+            requested_index = int(requested_index)
+        except (TypeError, ValueError):
+            return _err("track_index must be a positive integer",
+                        code="INVALID_TRACK_INDEX", category="invalid_input")
+        if requested_index < 1:
+            return _err("track_index must be a positive integer",
+                        code="INVALID_TRACK_INDEX", category="invalid_input")
+
+    transitions: List[Dict[str, Any]] = []
+    examined = 0
+    unreadable = 0
+    track_types = [requested_type] if requested_type else ["video", "audio"]
+    for track_type in track_types:
+        count = _timeline_track_count(tl, track_type)
+        indexes = [requested_index] if requested_index is not None else range(1, count + 1)
+        for track_index in indexes:
+            if track_index > count:
+                continue
+            try:
+                items = list(tl.GetItemListInTrack(track_type, track_index) or [])
+            except Exception:
+                unreadable += 1
+                continue
+            for item in items:
+                examined += 1
+                is_transition, evidence = _timeline_transition_evidence(item)
+                if evidence.get("classification_error"):
+                    unreadable += 1
+                if is_transition:
+                    transitions.append(
+                        _timeline_transition_row(item, track_type, track_index, items)
+                    )
+
+    by_name: Dict[str, int] = {}
+    for transition in transitions:
+        name = transition.get("name") or "<unnamed>"
+        by_name[name] = by_name.get(name, 0) + 1
+    warnings = []
+    if unreadable:
+        warnings.append(
+            f"{unreadable} item/track reads were not classifiable and were skipped; "
+            "no uncertain item is reported as a transition."
+        )
+    return {
+        "transitions": transitions,
+        "count": len(transitions),
+        "summary": {"by_name": by_name, "items_examined": examined,
+                    "unreadable_count": unreadable},
+        "capabilities": {
+            "inspect_existing": True,
+            "remove_existing": True,
+            "create": False,
+            "clone": False,
+            "set_type": False,
+            "set_alignment": False,
+            "set_duration": False,
+            "note": "The public Resolve scripting API exposes existing transitions as timeline items but has no transition creation or editing methods.",
+        },
+        "warnings": warnings,
+    }
 
 
 def _normalize_include_linked(raw):
@@ -21768,6 +21998,12 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
     - execute_swap(plan_id, alternate_index, confirm_token?) — replaces the
       item in place (lift + positioned append, same slot) on the current
       timeline (version-archived first).
+    - animated_caption_presets() — list deterministic Fusion-overlay presets.
+    - plan_animated_captions(words|blocks, fps?, timeline_start_frame?,
+      track_index?, preset?, fusion_template?) — exact-frame, JSON-safe plan.
+    - create_animated_captions(plan | words | blocks, timeline_name?, ...)
+      — creates editable nested Fusion titles on a chosen video track. These
+      are title overlays, not native/accessibility subtitle items.
     - list_plans(limit?) / get_plan(plan_id)
     """
     p = _params(params)
@@ -21787,6 +22023,146 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
         return None, None, None, _err(
             "No project context — open a Resolve project (or pass analysis_root for plan_selects)."
         )
+
+    def _animated_caption_plan(*, require_timeline: bool = False):
+        from src.utils import animated_captions as _animated_captions_mod
+
+        words = p.get("words")
+        blocks = p.get("blocks")
+        clip_ref = p.get("clip_ref") or p.get("clipRef") or p.get("clip_id")
+        resolve_obj = project = timeline_obj = project_root = None
+
+        if words is None and blocks is None and clip_ref:
+            from src.utils import strata as _strata_mod
+
+            resolve_obj, project, project_root, err = _project_context(need_resolve=False)
+            if err:
+                return None, None, None, err
+            conn, clip, clip_err = _strata_mod.resolve_clip(
+                project_root, clip_ref, require_media=False
+            )
+            if clip_err:
+                return None, None, None, clip_err
+            words = _strata_mod.read_words(conn, clip["clip_uuid"])
+
+        fps = p.get("fps", p.get("timeline_fps", p.get("timelineFps")))
+        start_frame = p.get(
+            "timeline_start_frame", p.get("timelineStartFrame")
+        )
+        if require_timeline or fps is None or start_frame is None:
+            if project is None:
+                resolve_obj, project, project_root, err = _project_context(need_resolve=True)
+                if err:
+                    return None, None, None, err
+            timeline_name = p.get("timeline_name") or p.get("timelineName")
+            timeline_obj = (
+                _find_timeline_by_name(project, timeline_name)[0]
+                if timeline_name else project.GetCurrentTimeline()
+            )
+            if not timeline_obj:
+                return None, None, None, _err("Timeline not found")
+            if fps is None:
+                fps = _edit_engine_timeline_fps(timeline_obj)
+            if start_frame is None:
+                start_frame = _timeline_start_frame(timeline_obj)
+
+        options: Dict[str, Any] = {
+            "fps": fps,
+            "words": words,
+            "blocks": blocks,
+            "timeline_start_frame": start_frame if start_frame is not None else 0,
+            "track_index": p.get("track_index", p.get("trackIndex", 2)),
+            "preset": str(p.get("preset") or "pop"),
+            "fusion_template": str(
+                p.get("fusion_template") or p.get("fusionTemplate") or "Text+"
+            ),
+        }
+        for snake, camel in (
+            ("max_chars_per_line", "maxCharsPerLine"),
+            ("max_lines", "maxLines"),
+            ("max_block_seconds", "maxBlockSeconds"),
+            ("min_block_seconds", "minBlockSeconds"),
+            ("min_gap_seconds", "minGapSeconds"),
+            ("pause_break_seconds", "pauseBreakSeconds"),
+        ):
+            value = p.get(snake, p.get(camel))
+            if value is not None:
+                options[snake] = value
+        try:
+            plan = _animated_captions_mod.plan_animated_captions(**options)
+        except _animated_captions_mod.AnimatedCaptionPlanError as exc:
+            return None, timeline_obj, project, _err(
+                str(exc), code="ANIMATED_CAPTION_PLAN_INVALID", category="invalid_input"
+            )
+        return plan, timeline_obj, project, None
+
+    if action == "animated_caption_presets":
+        from src.utils import animated_captions as _animated_captions_mod
+
+        catalog = _animated_captions_mod.preset_catalog()
+        return {
+            "success": True,
+            "presets": catalog,
+            "count": len(catalog),
+            "native_subtitle_track": False,
+        }
+
+    if action == "plan_animated_captions":
+        plan, _timeline, _project, err = _animated_caption_plan(require_timeline=False)
+        if err:
+            return err
+        return {"success": True, "plan": plan}
+
+    if action == "create_animated_captions":
+        from src.utils.animated_caption_apply import (
+            AnimatedCaptionApplyError,
+            apply_animated_caption_plan,
+        )
+
+        supplied_plan = p.get("plan")
+        if supplied_plan is not None and not isinstance(supplied_plan, dict):
+            return _err(
+                "plan must be an animated-caption plan object",
+                code="ANIMATED_CAPTION_PLAN_INVALID", category="invalid_input",
+            )
+        if supplied_plan is None:
+            supplied_plan, timeline_obj, project, err = _animated_caption_plan(
+                require_timeline=True
+            )
+            if err:
+                return err
+        else:
+            _resolve, project, _root, err = _project_context(need_resolve=True)
+            if err:
+                return err
+            timeline_name = p.get("timeline_name") or p.get("timelineName")
+            timeline_obj = (
+                _find_timeline_by_name(project, timeline_name)[0]
+                if timeline_name else project.GetCurrentTimeline()
+            )
+            if not timeline_obj:
+                return _err("Timeline not found")
+        try:
+            return apply_animated_caption_plan(
+                project,
+                timeline_obj,
+                supplied_plan,
+                template_name=str(
+                    p.get("fusion_template") or p.get("fusionTemplate")
+                    or supplied_plan.get("fusion_template") or "Text+"
+                ),
+                track_index=p.get("track_index", p.get("trackIndex")),
+                frame_mode=str(p.get("frame_mode") or p.get("frameMode") or "auto"),
+                name_prefix=str(p.get("name_prefix") or p.get("namePrefix") or "DVR Caption"),
+                rollback_on_error=str(
+                    p.get("rollback_on_error", p.get("rollbackOnError", True))
+                ).strip().lower() not in {"false", "0", "no", "off"},
+            )
+        except AnimatedCaptionApplyError as exc:
+            return _err(
+                str(exc), code="ANIMATED_CAPTION_APPLY_FAILED",
+                category="resolve_operation_failed",
+            )
 
     if action == "list_plans":
         _r, _proj, project_root, err = _project_context(need_resolve=False)
@@ -22885,6 +23261,9 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
         "plan_transcript_tighten",
         "rank_takes",
         "generate_captions",
+        "animated_caption_presets",
+        "plan_animated_captions",
+        "create_animated_captions",
         "search_spoken_content",
         "execute_silence_ripple",
         "plan_swap",
@@ -22902,7 +23281,8 @@ _TIMELINE_ACTIONS = [
     "get_end_frame", "get_start_timecode", "set_start_timecode", "get_track_count",
     "add_track", "delete_track", "get_track_sub_type", "set_track_enable",
     "get_track_enabled", "set_track_lock", "get_track_locked", "get_track_name",
-    "set_track_name", "get_items", "delete_clips", "set_clips_linked", "duplicate",
+    "set_track_name", "get_items", "transition_report", "list_transitions",
+    "delete_transition", "delete_clips", "set_clips_linked", "duplicate",
     "duplicate_clips", "copy_clips", "move_clips", "ripple_insert", "copy_range", "duplicate_range",
     "overwrite_range", "lift_range", "story_spine_report", "create_variant_from_ranges",
     "bulk_set_item_properties", "apply_look_to_items", "thumbnail_contact_sheet",
@@ -22967,6 +23347,15 @@ def timeline(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, 
       get_track_name(track_type, index) -> {name}
       set_track_name(track_type, index, name) -> {success}
       get_items(track_type, index|track_index) -> {items}  — track_type: video|audio|subtitle
+      transition_report(track_type?, track_index?|index?) -> {transitions, count, summary, capabilities, warnings}
+        Conservatively inventories existing video/audio transitions, including name,
+        track, range, duration, cut neighbors, and handle warnings where readable.
+        Public Resolve scripting cannot create/clone a transition or read/edit its
+        type beyond the name, alignment, parameters, or duration.
+      list_transitions(...) -> same as transition_report
+      delete_transition(transition_id|timeline_item_id, confirm_token?) -> {success, deleted, transition}
+        DESTRUCTIVE. Deletes only an item that passes the transition discriminator;
+        confirmation-token gated and never ripples adjacent clips.
       clip_where(filters|track_type?, track_index?, name_contains?, duration_lt?, duration_gt?) -> {clips, match_count, total_clips}
         Find clips on the current timeline matching named filters (AND). Pass filters
         inline or as a `filters` dict. Live filters: track_type, track_index,
@@ -23329,6 +23718,51 @@ def timeline(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, 
             return _err(err)
         items = tl.GetItemListInTrack(track_type, track_index)
         return {"items": [{"name": it.GetName(), "id": it.GetUniqueId(), "start": it.GetStart(), "end": it.GetEnd(), "duration": it.GetDuration()} for it in (items or [])]}
+    elif action in {"transition_report", "list_transitions"}:
+        return _timeline_transition_report(tl, p)
+    elif action == "delete_transition":
+        transition_id = p.get("transition_id") or p.get("timeline_item_id") or p.get("id")
+        if not transition_id:
+            return _err(
+                "delete_transition requires transition_id (timeline_item_id and id are aliases)",
+                code="MISSING_TRANSITION_ID", category="invalid_input",
+                remediation="Call timeline(action='list_transitions') and pass one returned id.",
+            )
+        found = _timeline_items_by_ids(tl, [transition_id], track_types=("video", "audio"))
+        if not found:
+            return _err(
+                f"No video/audio timeline item found with id {transition_id!r}",
+                code="TRANSITION_NOT_FOUND", category="invalid_input",
+                remediation="Call timeline(action='list_transitions') to enumerate valid transition IDs.",
+            )
+        item = found[0]
+        is_transition, evidence = _timeline_transition_evidence(item)
+        if not is_transition:
+            return _err(
+                f"Timeline item {transition_id!r} is not safely identifiable as a transition",
+                code="NOT_A_TRANSITION", category="invalid_input",
+                remediation="Only IDs returned by list_transitions may be deleted by this action.",
+                state={"classification": evidence},
+            )
+        track_info, _ = _timeline_item_track_info(item)
+        track_type, track_index = track_info or (None, None)
+        track_items = (tl.GetItemListInTrack(track_type, track_index) or []) if track_info else [item]
+        transition_row = _timeline_transition_row(item, track_type, track_index, list(track_items))
+        if "confirm_token" not in p and "confirmToken" not in p and _confirm_token_required():
+            return _issue_confirm_token(
+                action="timeline.delete_transition", params=p,
+                preview={
+                    "operation": "timeline.delete_transition",
+                    "warning": "Permanently removes this transition. Adjacent clips are not rippled or trimmed.",
+                    "transition": transition_row,
+                },
+            )
+        blocked = _consume_confirm_token(action="timeline.delete_transition", params=p)
+        if blocked:
+            return blocked
+        success = _timeline_delete_clips_verified(tl, [item], False, resolve=get_resolve())
+        return {"success": success, "deleted": success, "transition": transition_row,
+                "ripple": False}
     elif action == "delete_clips":
         # Find timeline items by unique IDs
         ids_set = set(p["clip_ids"])
@@ -25192,6 +25626,32 @@ _ACTION_HELP: Dict[str, Dict[str, Dict[str, Any]]] = {
                 '  "try_heuristic_keys": True,\n'
                 '  "readback": True\n'
                 '})'
+            ),
+        },
+        "transition_report": {
+            "summary": "Inventory existing video/audio transitions with cut-neighbor and handle context.",
+            "params": "track_type? (video|audio), track_index?|index? (1-based)",
+            "returns": "{transitions, count, summary, capabilities, warnings}",
+            "example": (
+                'timeline(action="transition_report", params={\n'
+                '  "track_type": "video", "track_index": 1\n'
+                '})'
+            ),
+        },
+        "list_transitions": {
+            "summary": "Alias of transition_report: list conservatively identified transition timeline items.",
+            "params": "track_type? (video|audio), track_index?|index? (1-based)",
+            "returns": "{transitions, count, summary, capabilities, warnings}",
+            "example": 'timeline(action="list_transitions", params={})',
+        },
+        "delete_transition": {
+            "summary": "Delete one verified transition without ripple. Confirm_token required by default.",
+            "params": "transition_id|timeline_item_id|id, confirm_token?",
+            "returns": "{success, deleted, transition, ripple}",
+            "example": (
+                'timeline(action="delete_transition", params={\n'
+                '  "transition_id": "TimelineItem-transition-1"\n'
+                '})  # first call returns confirm_token; re-call with it to delete'
             ),
         },
         "delete_clips": {

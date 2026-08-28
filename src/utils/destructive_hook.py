@@ -72,9 +72,11 @@ DESTRUCTIVE_ACTIONS_BY_TOOL: Dict[str, FrozenSet[str]] = {
         "execute_tighten",
         "execute_silence_ripple",
         "execute_swap",
+        "create_animated_captions",
     }),
     "timeline": frozenset({
         "delete_clips",
+        "delete_transition",
         "move_clips",
         "duplicate_clips",
         "copy_clips",

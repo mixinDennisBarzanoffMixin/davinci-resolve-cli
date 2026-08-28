@@ -42,22 +42,25 @@ workflow:
 - Fusion title insertion, Text+ input writes, keyframes, and exact placement by
   the verified nested-timeline route exist as separate primitives.
 
-The missing product is one coherent command family:
+The first CLI layer is now implemented:
 
 ```bash
-# Proposed interfaces; not implemented yet.
-dvr captions write --words words.json --format srt --output captions.srt
-dvr captions compose --input captions.srt --format native --output captions.drt
-dvr captions animate --words words.json --preset word-pop --track 3 --apply
-dvr captions verify --render export.mov --expect burn-in
+dvr advanced captions parse inputPath=captions.srt
+dvr advanced captions write inputPath=captions.srt outputFormat=vtt outputPath=captions.vtt
+dvr advanced captions compose_native inputPath=captions.srt outputPath=captions.drt frameRate=24
+dvr edit_engine plan_animated_captions --input @caption-request.json fps=24 track_index=3 preset=pop
+dvr edit_engine create_animated_captions --input @caption-request.json track_index=3 preset=pop fusion_template=Text+
 ```
 
-`captions animate` should generate editable Fusion title overlays on a chosen
-video track, with presets such as pop, word highlight, karaoke, background box,
-and safe-area placement. This is the safest fully Bash-composable path because
-it uses public Fusion/title primitives; it produces title overlays, not an
-accessible native subtitle track. Native subtitle output should be a separate
-mode backed by the offline subtitle serializer. Applying Resolve's stock
+`create_animated_captions` generates one editable nested Fusion title per cue on
+a chosen video track. `clean` and `pop` are implemented; `pop` writes Text+
+scale/opacity keyframes, and any installed Fusion title template can be selected.
+The planner, executor, rollback, and API readback have offline test coverage;
+the new batch workflow still needs its first live Resolve render acceptance run.
+`word-highlight` and `karaoke` produce exact word-cue plans but deliberately
+refuse generic execution until a word-aware Fusion template executor is present.
+These overlays are not an accessible native subtitle track. Native subtitle
+output is the separate `compose_native` DRT mode. Applying Resolve's stock
 Animated template to a subtitle-track header remains UI-only unless its
 version-specific project data is safely decoded and verified.
 
@@ -73,24 +76,23 @@ duration setter for transitions. Existing transitions can be found as timeline
 items, inspected at a basic level, and deleted. The offline advanced layer can
 currently author only a centered Cross Dissolve.
 
-The useful CLI should be:
+Live inspection and removal are now implemented; offline apply/clone remains:
 
 ```bash
-# Proposed unified interfaces; not implemented yet.
-dvr transitions list --timeline current
-dvr transitions inspect --track 1 --at-frame 240
-dvr transitions apply --type cross-dissolve --track 1 --at-frame 240 --frames 12
-dvr transitions clone --from-frame 240 --to-frame 480
-dvr transitions remove --track 1 --at-frame 240 --confirm
-dvr transitions qc --timeline current
+dvr timeline list_transitions track_type=video track_index=1
+dvr timeline transition_report track_type=video
+dvr timeline delete_transition transition_id=...   # confirmation-token gated
+dvr advanced drp place_transition drpPath=in.drp outputPath=out.drp track=1 atFrame=240 durationFrames=12
 ```
 
-`list`, `inspect`, `remove`, and `qc` can use the live public API. `apply` and
-`clone` require offline DRT/DRP authoring or an explicitly optional UI
-companion. The offline implementation should start with dissolves and fades,
-validate source handles and cut alignment, import as a new timeline version,
-then render and read back the result. Arbitrary stock transitions must not be
-claimed until each encoded type has a live Resolve fixture.
+`transition_report` conservatively identifies transition timeline items and
+reports their track/range, neighboring cut, handle availability, and warnings.
+`delete_transition` only accepts an ID that passes the same discriminator and
+never ripples. Live creation and cloning remain impossible through the public
+API; the existing offline authoring path currently creates a centered Cross
+Dissolve. It still needs more validated types, new-timeline-version import,
+render proof, and readback. Arbitrary stock transitions must not be claimed
+until each encoded type has a live Resolve fixture.
 
 Fusion transition templates and DCTL transition assets are worth supporting as
 versioned user-supplied inputs. Generating the asset is already possible; the
@@ -140,9 +142,9 @@ Useful official overviews:
 
 ## Recommended build order
 
-1. `captions write|compose|animate|verify`, with native and Fusion-overlay modes.
-2. `transitions list|inspect|remove|apply|clone|qc`, live where possible and
-   offline where required.
+1. Live-import acceptance tests and render verification for native/animated captions;
+   add a calibrated word-aware Fusion template executor.
+2. Expand offline transition authoring beyond Cross Dissolve, with import/render/readback QC.
 3. Per-action schemas, real completion, and a persistent JSONL session.
 4. A guarded full FusionScript dispatcher plus explicit Lua/Python escape hatch.
 5. One coherent “shadow edit” workflow: export, patch as a new timeline version,

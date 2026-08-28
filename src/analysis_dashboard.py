@@ -4547,7 +4547,7 @@ HTML = r"""<!doctype html>
 
     <section class="span-12 subpage" data-subpage-scope="diagnostics" data-subpage="advanced">
       <h2>Advanced Server</h2>
-      <p class="section-copy">The optional offline Node sibling (<code>davinci-resolve-advanced-mcp</code>) edits Resolve files (<code>.drp</code>/<code>.drt</code>/<code>.drx</code>) and patches the project DB — no running Resolve required. The core is pure-JS and always available; a few features need user-installed helpers, shown live below. Full 18-tool catalog: Docs → Advanced Server.</p>
+      <p class="section-copy">The optional offline Node sibling (<code>davinci-resolve-advanced-mcp</code>) edits Resolve files (<code>.drp</code>/<code>.drt</code>/<code>.drx</code>) and patches the project DB — no running Resolve required. The core is pure-JS and always available; a few features need user-installed helpers, shown live below. Full 19-tool catalog: Docs → Advanced Server.</p>
       <div class="mpc-toolbar">
         <button id="advRefreshBtn" class="secondary" type="button">Refresh</button>
         <span id="advMeta" class="mpc-meta"></span>

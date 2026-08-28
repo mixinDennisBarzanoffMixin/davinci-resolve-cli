@@ -25,7 +25,7 @@ Current kernel coverage: **136 actions** across **9 compound MCP tools**.
 
 The kernels above wrap the **live** Python server (`davinci-resolve`), which
 drives a running Resolve. A companion **advanced** server
-(`davinci-resolve-advanced`, 18 tools — see `resolve-advanced/README.md`) does
+(`davinci-resolve-advanced`, 19 tools — see `resolve-advanced/README.md`) does
 the beyond-API, **no-Resolve-running** half: it authors/edits `.drp`/`.drt`/`.drx`
 files, patches the project DB, and computes grades, conform QC, and deliverable
 QC offline. The rule of thumb is *compute offline, apply live*. Kernels that have

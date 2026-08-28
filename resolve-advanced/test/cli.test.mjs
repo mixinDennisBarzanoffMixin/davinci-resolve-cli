@@ -29,8 +29,8 @@ async function cli(args, options = {}) {
   });
 }
 
-test('transport-neutral registry exposes all 18 MCP handler objects and their actions', () => {
-  assert.equal(TOOLS.length, 18);
+test('transport-neutral registry exposes all 19 MCP handler objects and their actions', () => {
+  assert.equal(TOOLS.length, 19);
   assert.equal(TOOL_BY_NAME.size, TOOLS.length);
   assert.equal(new Set(TOOLS.map((tool) => tool.name)).size, TOOLS.length);
   for (const tool of TOOLS) {
@@ -45,7 +45,7 @@ test('list, describe, and actions emit composable JSON discovery data', async ()
   assert.equal(listed.stderr, '');
   assert.equal(listed.stdout.split('\n').length, 2, 'compact output is one JSON line plus newline');
   const list = JSON.parse(listed.stdout);
-  assert.equal(list.count, 18);
+  assert.equal(list.count, 19);
   assert.deepEqual(
     list.tools.map(({ name }) => name),
     TOOLS.map(({ name }) => name),
