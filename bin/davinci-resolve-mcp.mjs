@@ -425,6 +425,15 @@ function commandBatch(args) {
 }
 
 function commandCli(args) {
+  // Completion is invoked on every Tab press. It is read-only and only scans
+  // packaged registries/docstrings, so run it directly from the immutable npm
+  // package instead of deleting/recopying the managed install each time.
+  if (args[0] === "__complete") {
+    const python = venvPython(installRoot()) || findSupportedPython();
+    const [command, ...commandArgs] = pythonCommandLine(python, ["-m", "src.cli", ...args]);
+    run(command, commandArgs, { cwd: PACKAGE_ROOT });
+    return;
+  }
   const root = syncManagedInstall(installRoot());
   const python = venvPython(root) || findSupportedPython();
   maybeWarnAbiRisk(python);

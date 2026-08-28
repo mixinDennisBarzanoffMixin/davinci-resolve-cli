@@ -22004,6 +22004,13 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
     - create_animated_captions(plan | words | blocks, timeline_name?, ...)
       — creates editable nested Fusion titles on a chosen video track. These
       are title overlays, not native/accessibility subtitle items.
+    - caption_qc(blocks | words | clip_ref, ...) — offline timing, line-length,
+      overlap, gap, duration, orphan-word, and reading-speed audit.
+    - plan_caption_repairs(blocks | words | clip_ref, ...) — dry-run rewrap and
+      available-gap timing repair plan; never deletes or paraphrases words.
+    - plan_caption_delivery(words | blocks | clip_ref, fps?, format?, ...) — one
+      shell-ready bundle containing accessibility sidecar text, caption QC, and
+      the matched animated-overlay plan from the same cue timings.
     - list_plans(limit?) / get_plan(plan_id)
     """
     p = _params(params)
@@ -22096,6 +22103,22 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
             )
         return plan, timeline_obj, project, None
 
+    def _caption_qc_options() -> Dict[str, Any]:
+        """Return one uncast profile so caption validation owns all errors."""
+        options: Dict[str, Any] = {}
+        for snake, camel in (
+            ("max_characters_per_second", "maxCharactersPerSecond"),
+            ("max_chars_per_line", "maxCharsPerLine"),
+            ("max_lines", "maxLines"),
+            ("min_block_seconds", "minBlockSeconds"),
+            ("max_block_seconds", "maxBlockSeconds"),
+            ("min_gap_seconds", "minGapSeconds"),
+        ):
+            value = p.get(snake, p.get(camel))
+            if value is not None:
+                options[snake] = value
+        return options
+
     if action == "animated_caption_presets":
         from src.utils import animated_captions as _animated_captions_mod
 
@@ -22112,6 +22135,79 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
         if err:
             return err
         return {"success": True, "plan": plan}
+
+    if action == "plan_caption_delivery":
+        from src.utils import captions as _captions_mod
+
+        _profile_options = _caption_qc_options()
+        _pause = p.get("pause_break_seconds", p.get("pauseBreakSeconds"))
+        if _pause is not None:
+            _profile_options["pause_break_seconds"] = _pause
+        try:
+            _profile = _captions_mod.validate_caption_profile(**_profile_options)
+        except _captions_mod.CaptionError as exc:
+            return _err(
+                str(exc), code="CAPTION_QC_INVALID", category="invalid_input"
+            )
+        # Planning and QC must consume the same canonical numbers. In
+        # particular, shell strings and non-finite values must never reach
+        # build_blocks' duration arithmetic.
+        for _key in (
+            "max_chars_per_line", "max_lines", "min_block_seconds",
+            "max_block_seconds", "min_gap_seconds", "pause_break_seconds",
+        ):
+            p[_key] = _profile[_key]
+        _plan, _timeline, _project, _plan_err = _animated_caption_plan(
+            require_timeline=False
+        )
+        if _plan_err:
+            return _plan_err
+        _format = str(p.get("format") or p.get("fmt") or "srt").lower()
+        if _format not in _captions_mod.FORMATS:
+            return _err(
+                f"unknown caption format {_format!r}; valid: {', '.join(_captions_mod.FORMATS)}",
+                code="CAPTION_PARAMS_INVALID", category="invalid_input",
+            )
+        _delivery_blocks = [
+            {
+                "start_seconds": row["source_timing_seconds"]["start"],
+                "end_seconds": row["source_timing_seconds"]["end"],
+                "lines": list(row["lines"]),
+            }
+            for row in _plan["placements"]
+        ]
+        try:
+            _qc = _captions_mod.audit_blocks(
+                _delivery_blocks, **_caption_qc_options()
+            )
+            _sidecar = _captions_mod.render(_delivery_blocks, _format)
+        except _captions_mod.CaptionError as exc:
+            return _err(
+                str(exc), code="CAPTION_QC_INVALID", category="invalid_input"
+            )
+        return {
+            "success": True,
+            "output_kind": "dual-caption-delivery-plan",
+            "native_sidecar": {
+                "format": _format,
+                "content": _sidecar,
+                "cue_count": len(_delivery_blocks),
+                "accessible_caption_artifact": True,
+                "embedded": False,
+            },
+            "animated_overlays": _plan,
+            "qc": _qc,
+            "contract": {
+                "same_timing_source": True,
+                "source_media_modified": False,
+                "resolve_project_modified": False,
+                "next_steps": [
+                    "Write native_sidecar.content to the requested sidecar file or author/import a native subtitle-track DRT.",
+                    "Apply animated_overlays only when a burned-in visual caption treatment is also desired.",
+                    "Render and inspect representative frames before delivery.",
+                ],
+            },
+        }
 
     if action == "create_animated_captions":
         from src.utils.animated_caption_apply import (
@@ -22142,6 +22238,28 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
             )
             if not timeline_obj:
                 return _err("Timeline not found")
+        timeline_name = p.get("timeline_name") or p.get("timelineName")
+        if timeline_name:
+            current_timeline = project.GetCurrentTimeline()
+            same_timeline = current_timeline is timeline_obj
+            if not same_timeline and current_timeline and timeline_obj:
+                try:
+                    same_timeline = (
+                        str(current_timeline.GetUniqueId())
+                        == str(timeline_obj.GetUniqueId())
+                    )
+                except Exception:
+                    same_timeline = False
+            if not same_timeline:
+                return _err(
+                    "create_animated_captions can only mutate the current timeline. "
+                    "The automatic recoverable archive would otherwise capture a different timeline.",
+                    code="TARGET_TIMELINE_NOT_CURRENT", category="precondition",
+                    remediation=(
+                        f"Run timeline set_current for {timeline_name!r}, then call "
+                        "create_animated_captions again without timeline_name."
+                    ),
+                )
         try:
             return apply_animated_caption_plan(
                 project,
@@ -22159,9 +22277,15 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
                 ).strip().lower() not in {"false", "0", "no", "off"},
             )
         except AnimatedCaptionApplyError as exc:
+            message = str(exc)
+            if "intersects existing" in message:
+                code, category = "ANIMATED_CAPTION_TARGET_OCCUPIED", "precondition"
+            elif "shorter than the requested caption duration" in message:
+                code, category = "ANIMATED_CAPTION_TEMPLATE_TOO_SHORT", "precondition"
+            else:
+                code, category = "ANIMATED_CAPTION_APPLY_FAILED", "resolve_api_failed"
             return _err(
-                str(exc), code="ANIMATED_CAPTION_APPLY_FAILED",
-                category="resolve_operation_failed",
+                message, code=code, category=category,
             )
 
     if action == "list_plans":
@@ -22269,6 +22393,72 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
         except _captions_mod.CaptionError as exc:
             return _err(str(exc), code="CAPTION_PARAMS_INVALID", category="invalid_input")
         _result["clip"] = {"clip_uuid": clip["clip_uuid"], "clip_name": clip.get("clip_name")}
+        return _result
+
+    if action in {"caption_qc", "plan_caption_repairs"}:
+        from src.utils import captions as _captions_mod
+
+        _blocks = p.get("blocks")
+        _words = p.get("words")
+        _clip = None
+        try:
+            if _blocks is None:
+                if _words is None:
+                    _clip_ref = p.get("clip_ref") or p.get("clipRef") or p.get("clip_id")
+                    if not _clip_ref:
+                        return _err(
+                            "Provide blocks, words, or clip_ref.",
+                            code="CAPTION_SOURCE_REQUIRED", category="invalid_input",
+                        )
+                    from src.utils import strata as _strata_mod
+
+                    _r, _proj, _root, _ctx_err = _project_context(need_resolve=False)
+                    if _ctx_err:
+                        return _ctx_err
+                    _conn, _clip, _clip_err = _strata_mod.resolve_clip(
+                        _root, _clip_ref, require_media=False
+                    )
+                    if _clip_err:
+                        return _clip_err
+                    _words = _strata_mod.read_words(_conn, _clip["clip_uuid"])
+                _build_options = {}
+                for _key, _camel in (
+                    ("max_chars_per_line", "maxCharsPerLine"),
+                    ("max_lines", "maxLines"),
+                    ("max_block_seconds", "maxBlockSeconds"),
+                    ("min_block_seconds", "minBlockSeconds"),
+                    ("min_gap_seconds", "minGapSeconds"),
+                    ("pause_break_seconds", "pauseBreakSeconds"),
+                ):
+                    _value = p.get(_key, p.get(_camel))
+                    if _value is not None:
+                        _build_options[_key] = (
+                            int(_value) if _key in {"max_chars_per_line", "max_lines"}
+                            else float(_value)
+                        )
+                _words = _captions_mod.validate_timed_words(_words)
+                _blocks = _captions_mod.build_blocks(_words, **_build_options)
+                if not _blocks:
+                    return _err(
+                        "No timed words to audit.", code="NO_TIMED_WORDS",
+                        category="precondition",
+                    )
+
+            _qc_options = _caption_qc_options()
+            _result = (
+                _captions_mod.audit_blocks(_blocks, **_qc_options)
+                if action == "caption_qc"
+                else _captions_mod.plan_repairs(_blocks, **_qc_options)
+            )
+        except (TypeError, ValueError, _captions_mod.CaptionError) as exc:
+            return _err(
+                str(exc), code="CAPTION_QC_INVALID", category="invalid_input"
+            )
+        if _clip:
+            _result["clip"] = {
+                "clip_uuid": _clip["clip_uuid"],
+                "clip_name": _clip.get("clip_name"),
+            }
         return _result
 
     if action == "plan_transcript_tighten":
@@ -23261,6 +23451,9 @@ def edit_engine(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
         "plan_transcript_tighten",
         "rank_takes",
         "generate_captions",
+        "caption_qc",
+        "plan_caption_repairs",
+        "plan_caption_delivery",
         "animated_caption_presets",
         "plan_animated_captions",
         "create_animated_captions",

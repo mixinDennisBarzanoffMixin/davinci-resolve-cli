@@ -120,6 +120,12 @@ module.exports = {
 
   // Insert a cross-dissolve between two abutting clips (the one op the Resolve API can't do).
   placeTransition: require('./place-transition').placeTransition,
+  listTransitions: require('./transition-ops').listTransitions,
+  validateTransitions: require('./transition-ops').validateTransitions,
+  cloneTransition: require('./transition-ops').cloneTransition,
+  setTransitionDuration: require('./transition-ops').setTransitionDuration,
+  deleteTransition: require('./transition-ops').deleteTransition,
+  transitionCapabilities: require('./transition-ops').transitionCapabilities,
 
   // Read/replace a Fusion Title's text + style (font/size/justify) inside a CompositionBA blob.
   decodeTitleText: require('./composition-text').decodeTitleText,

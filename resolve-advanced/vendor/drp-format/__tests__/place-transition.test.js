@@ -45,4 +45,31 @@ test('placeTransition validates args', async () => {
   const buf = await synth2();
   await assert.rejects(() => placeTransition(buf, { track: 1, atFrame: 100, durationFrames: 1 }), /durationFrames/);
   await assert.rejects(() => placeTransition(buf, { track: 1, atFrame: 100, trackType: 'audio' }), /only video/);
+  await assert.rejects(() => placeTransition(buf, { track: 1, atFrame: 100, alignment: 'start' }), /only center alignment/);
+  await assert.rejects(() => placeTransition(buf, { track: 1, atFrame: 100, transitionType: 'wipe' }), /only cross_dissolve/);
+  await assert.rejects(() => placeTransition(buf, { track: 1, atFrame: 100, durationPreset: 'standard' }), /frameRate/);
+});
+
+test('placeTransition resolves seconds and named duration presets at an explicit frame rate', async () => {
+  const seconds = await placeTransition(await synth2(), { track: 1, atFrame: 100, durationSeconds: 0.5, frameRate: 24 });
+  assert.equal(seconds.durationFrames, 12);
+  assert.equal(seconds.durationSource, 'seconds');
+
+  const preset = await placeTransition(await synth2(), { track: 1, atFrame: 100, durationPreset: 'subtle', frameRate: 30 });
+  assert.equal(preset.durationFrames, 8);
+  assert.equal(preset.durationSource, 'preset:subtle');
+  assert.equal(preset.alignment, 'center');
+  assert.match(preset.fixture, /Resolve 21/);
+});
+
+test('placeTransition refuses a second transition at an occupied cut', async () => {
+  const first = await placeTransition(await synth2(), {
+    track: 1,
+    atFrame: 100,
+    durationFrames: 12,
+  });
+  await assert.rejects(
+    () => placeTransition(first.buffer, { track: 1, atFrame: 100, durationFrames: 8 }),
+    /already has a transition/,
+  );
 });

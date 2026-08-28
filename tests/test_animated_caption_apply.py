@@ -17,7 +17,9 @@ class Tool:
         self.values[name] = value
         return True
 
-    def GetInput(self, name):
+    def GetInput(self, name, frame=None):
+        if frame is not None and name in self.inputs:
+            return self.inputs[name].keyframes.get(frame)
         return self.values.get(name)
 
     def GetInputList(self):
@@ -44,6 +46,9 @@ class AnimInput:
 
     def __setitem__(self, frame, value):
         self.keyframes[frame] = value
+
+    def GetKeyFrames(self):
+        return {index: frame for index, frame in enumerate(sorted(self.keyframes), 1)}
 
 
 class InputInfo:
@@ -72,14 +77,18 @@ class Comp:
 
 
 class TitleItem:
-    def __init__(self, tool):
+    def __init__(self, tool, duration=1000):
         self.comp = Comp(tool)
+        self.duration = duration
 
     def GetFusionCompCount(self):
         return 1
 
     def GetFusionCompByIndex(self, index):
         return self.comp if index == 1 else None
+
+    def GetDuration(self):
+        return self.duration
 
 
 class PlacedItem:
@@ -97,13 +106,15 @@ class PlacedItem:
 
 
 class Timeline:
-    def __init__(self, name, start=108000, tracks=1, template_ok=True):
+    def __init__(self, name, start=108000, tracks=1, template_ok=True, title_duration=1000):
         self.name = name
         self.start = start
         self.tracks = tracks
         self.tool = Tool()
         self.template_ok = template_ok
+        self.title_duration = title_duration
         self.deleted = []
+        self.existing_items = {}
 
     def GetStartFrame(self):
         return self.start
@@ -118,7 +129,10 @@ class Timeline:
         return True
 
     def InsertFusionTitleIntoTimeline(self, name):
-        return TitleItem(self.tool) if self.template_ok else None
+        return TitleItem(self.tool, self.title_duration) if self.template_ok else None
+
+    def GetItemListInTrack(self, kind, index):
+        return list(self.existing_items.get((kind, index), []))
 
     def GetMediaPoolItem(self):
         return self
@@ -127,13 +141,22 @@ class Timeline:
         self.deleted.extend(items)
         return True
 
+    def DeleteTrack(self, kind, index):
+        if kind != "video" or index != self.tracks:
+            return False
+        self.tracks -= 1
+        return True
+
 
 class MediaPool:
     def __init__(self):
         self.sources = []
         self.appended = []
+        self.append_targets = []
         self.fail_append_at = None
         self.deleted_timelines = []
+        self.delete_timeline_targets = []
+        self.project = None
 
     def CreateEmptyTimeline(self, name):
         source = Timeline(name, start=0)
@@ -142,12 +165,14 @@ class MediaPool:
 
     def AppendToTimeline(self, infos):
         info = infos[0]
+        self.append_targets.append(self.project.current if self.project else None)
         if self.fail_append_at == len(self.appended):
             return []
         self.appended.append(info)
         return [PlacedItem(info)]
 
     def DeleteTimelines(self, timelines):
+        self.delete_timeline_targets.append(self.project.current if self.project else None)
         self.deleted_timelines.extend(timelines)
         return True
 
@@ -155,10 +180,14 @@ class MediaPool:
 class Project:
     def __init__(self, pool):
         self.pool = pool
+        self.pool.project = self
         self.current = None
 
     def GetMediaPool(self):
         return self.pool
+
+    def GetCurrentTimeline(self):
+        return self.current
 
     def SetCurrentTimeline(self, timeline):
         self.current = timeline
@@ -194,6 +223,7 @@ class AnimatedCaptionApplyTests(unittest.TestCase):
         self.assertEqual([row["recordFrame"] for row in self.pool.appended], [108012, 108048])
         self.assertEqual([row["endFrame"] for row in self.pool.appended], [24, 18])
         self.assertEqual([source.tool.values["StyledText"] for source in self.pool.sources], ["Hello", "world"])
+        self.assertTrue(all(target is self.destination for target in self.pool.append_targets))
         self.assertIs(self.project.current, self.destination)
         self.assertNotEqual(result["captions"][0]["source_timeline"], result["captions"][1]["source_timeline"])
 
@@ -206,6 +236,19 @@ class AnimatedCaptionApplyTests(unittest.TestCase):
         )
         self.assertEqual(self.pool.appended[0]["recordFrame"], 108010)
         self.assertEqual(self.pool.appended[0]["endFrame"], 10)
+
+    def test_existing_target_track_overlap_is_refused_before_mutation(self):
+        self.destination.existing_items[("video", 1)] = [
+            ExistingItem("User title", 108005, 108020)
+        ]
+        with self.assertRaisesRegex(AnimatedCaptionApplyError, "intersects existing"):
+            apply_animated_caption_plan(
+                self.project,
+                self.destination,
+                plan({"text": "A", "start_frame": 108010, "end_frame": 108030}, track=1),
+                frame_mode="absolute",
+            )
+        self.assertEqual(self.pool.sources, [])
 
     def test_per_caption_template_override_is_supported(self):
         result = apply_animated_caption_plan(
@@ -250,16 +293,99 @@ class AnimatedCaptionApplyTests(unittest.TestCase):
         self.assertEqual(tool.inputs["Size"].keyframes[0], 0.05 * 0.82)
         self.assertEqual(tool.inputs["Opacity1"].keyframes[4], 1.0)
 
-    def test_word_aware_native_effect_is_not_faked(self):
+    def test_word_highlight_expands_to_exact_active_word_title_segments(self):
         nested = {
             "placements": [{
                 "text": "one two",
                 "timeline": {"record_frame": 108000, "duration_frames": 24},
+                "animation": {
+                    "preset": "word-highlight",
+                    "word_cues": [
+                        {"text": "one", "start_frame": 0, "end_frame_exclusive": 5},
+                        {"text": "two", "start_frame": 8, "end_frame_exclusive": 14},
+                    ],
+                },
+            }],
+        }
+        result = apply_animated_caption_plan(self.project, self.destination, nested)
+        self.assertTrue(result["word_aware_execution"])
+        self.assertEqual(result["input_placement_count"], 1)
+        self.assertEqual(result["caption_count"], 2)
+        self.assertEqual(
+            [row["recordFrame"] for row in self.pool.appended],
+            [108000, 108008],
+        )
+        self.assertEqual([row["endFrame"] for row in self.pool.appended], [5, 6])
+        self.assertEqual(
+            [source.tool.values["StyledText"] for source in self.pool.sources],
+            ["one", "two"],
+        )
+        execution = result["captions"][0]["word_execution"]
+        self.assertEqual(execution["strategy"], "one-title-per-spoken-word")
+        self.assertTrue(execution["degraded_from_requested_style"])
+        self.assertIn("active word", execution["limitation"])
+
+    def test_karaoke_expands_to_cumulative_segments_at_word_starts(self):
+        nested = {
+            "placements": [{
+                "text": "Sing along now",
+                "timeline": {"record_frame": 108100, "duration_frames": 30},
+                "animation": {
+                    "preset": "karaoke",
+                    "word_cues": [
+                        {"text": "Sing", "start_frame": 2, "end_frame_exclusive": 7},
+                        {"text": "along", "start_frame": 9, "end_frame_exclusive": 15},
+                        {"text": "now", "start_frame": 18, "end_frame_exclusive": 23},
+                    ],
+                },
+            }],
+        }
+        result = apply_animated_caption_plan(self.project, self.destination, nested)
+        self.assertEqual(result["caption_count"], 3)
+        self.assertEqual(
+            [row["recordFrame"] for row in self.pool.appended],
+            [108102, 108109, 108118],
+        )
+        self.assertEqual([row["endFrame"] for row in self.pool.appended], [7, 9, 12])
+        self.assertEqual(
+            [source.tool.values["StyledText"] for source in self.pool.sources],
+            ["Sing", "Sing along", "Sing along now"],
+        )
+        for caption in result["captions"]:
+            self.assertEqual(
+                caption["word_execution"]["strategy"],
+                "cumulative-title-segments",
+            )
+            self.assertIn("not a continuous", caption["word_execution"]["limitation"])
+
+    def test_word_mode_rejects_missing_or_overlapping_cues_before_mutation(self):
+        missing = {
+            "placements": [{
+                "text": "one",
+                "timeline": {"record_frame": 108000, "duration_frames": 24},
                 "animation": {"preset": "word-highlight", "word_cues": [{"text": "one"}]},
             }],
         }
-        with self.assertRaisesRegex(AnimatedCaptionApplyError, "word-aware"):
-            apply_animated_caption_plan(self.project, self.destination, nested)
+        with self.assertRaisesRegex(AnimatedCaptionApplyError, "start_frame"):
+            apply_animated_caption_plan(self.project, self.destination, missing)
+        self.assertEqual(self.pool.sources, [])
+
+        overlapping = {
+            "placements": [{
+                "text": "one two",
+                "timeline": {"record_frame": 108000, "duration_frames": 24},
+                "animation": {
+                    "preset": "word-highlight",
+                    "word_cues": [
+                        {"text": "one", "start_frame": 0, "end_frame_exclusive": 8},
+                        {"text": "two", "start_frame": 6, "end_frame_exclusive": 12},
+                    ],
+                },
+            }],
+        }
+        with self.assertRaisesRegex(AnimatedCaptionApplyError, "word cues overlap"):
+            apply_animated_caption_plan(self.project, self.destination, overlapping)
+        self.assertEqual(self.pool.sources, [])
 
     def test_overlap_is_refused_before_any_mutation(self):
         with self.assertRaisesRegex(AnimatedCaptionApplyError, "overlap"):
@@ -281,6 +407,14 @@ class AnimatedCaptionApplyTests(unittest.TestCase):
                 plan({"text": "A", "start_frame": 0, "end_frame": 10}),
                 frame_mode="timecode",
             )
+
+    def test_fractional_frame_is_refused_instead_of_truncated(self):
+        with self.assertRaisesRegex(AnimatedCaptionApplyError, "integer"):
+            apply_animated_caption_plan(
+                self.project,
+                self.destination,
+                plan({"text": "A", "start_frame": 1.5, "end_frame": 10}),
+            )
         with self.assertRaisesRegex(AnimatedCaptionApplyError, "text"):
             apply_animated_caption_plan(
                 self.project,
@@ -301,7 +435,63 @@ class AnimatedCaptionApplyTests(unittest.TestCase):
             )
         self.assertEqual(len(self.destination.deleted), 1)
         self.assertEqual(len(self.pool.deleted_timelines), 2)
+        self.assertTrue(all(target is self.destination for target in self.pool.delete_timeline_targets))
+        self.assertEqual(self.destination.tracks, 1)
         self.assertIs(self.project.current, self.destination)
+
+    def test_failure_before_append_removes_source_and_added_tracks(self):
+        self.pool.sources.clear()
+        original_create = self.pool.CreateEmptyTimeline
+
+        def create_bad(name):
+            source = original_create(name)
+            source.template_ok = False
+            return source
+
+        self.pool.CreateEmptyTimeline = create_bad
+        with self.assertRaisesRegex(AnimatedCaptionApplyError, "could not be inserted"):
+            apply_animated_caption_plan(
+                self.project,
+                self.destination,
+                plan({"text": "A", "start_frame": 0, "end_frame": 10}),
+                track_index=3,
+            )
+        self.assertEqual(self.destination.tracks, 1)
+        self.assertEqual(len(self.pool.deleted_timelines), 1)
+        self.assertIs(self.pool.delete_timeline_targets[0], self.destination)
+
+    def test_short_source_template_is_refused_and_rolled_back(self):
+        original_create = self.pool.CreateEmptyTimeline
+
+        def create_short(name):
+            source = original_create(name)
+            source.title_duration = 5
+            return source
+
+        self.pool.CreateEmptyTimeline = create_short
+        with self.assertRaisesRegex(AnimatedCaptionApplyError, "shorter than"):
+            apply_animated_caption_plan(
+                self.project,
+                self.destination,
+                plan({"text": "A", "start_frame": 0, "end_frame": 10}),
+            )
+        self.assertEqual(len(self.pool.deleted_timelines), 1)
+
+
+class ExistingItem:
+    def __init__(self, name, start, end):
+        self.name = name
+        self.start = start
+        self.end = end
+
+    def GetName(self):
+        return self.name
+
+    def GetStart(self):
+        return self.start
+
+    def GetEnd(self):
+        return self.end
 
 
 if __name__ == "__main__":

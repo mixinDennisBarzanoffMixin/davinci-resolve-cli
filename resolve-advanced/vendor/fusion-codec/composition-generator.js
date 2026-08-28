@@ -387,6 +387,10 @@ function listTemplates() {
   return templates;
 }
 
+// Reusable Edit-page title-template assets. Kept in the Fusion codec barrel so
+// callers do not have to know the vendored file layout.
+const animatedCaptionSetting = require('./animated-caption-setting');
+
 // ─── Exports ────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -398,4 +402,7 @@ module.exports = {
   registerTemplate,
   loadTemplate,
   listTemplates,
+  generateAnimatedCaptionSetting: animatedCaptionSetting.generateAnimatedCaptionSetting,
+  validateAnimatedCaptionSetting: animatedCaptionSetting.validateAnimatedCaptionSetting,
+  listAnimatedCaptionSettingPresets: animatedCaptionSetting.listAnimatedCaptionSettingPresets,
 };

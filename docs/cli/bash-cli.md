@@ -39,7 +39,7 @@ settings, and the in-app bridge.
 
 ```text
 dvr tools [--surface compound|granular|all]
-dvr describe TOOL [--surface compound|granular]
+dvr describe TOOL [ACTION] [--surface compound|granular]
 dvr advanced describe TOOL
 dvr actions TOOL
 dvr prompts
@@ -58,6 +58,7 @@ dvr doctor [ARGS ...]
 dvr server [ARGS ...]
 dvr control-panel [ARGS ...]
 dvr completion <bash|zsh|fish>
+dvr session
 ```
 
 `dvr call` targets the compound surface unless `--surface` selects another
@@ -82,6 +83,7 @@ Start with discovery instead of copying a possibly stale list from a document:
 dvr tools --surface compound
 dvr tools --surface granular | jq -r '.tools[].name'
 dvr describe timeline
+dvr describe timeline get_items
 dvr actions timeline
 dvr describe get_project_setting --surface granular
 dvr advanced actions project_read
@@ -93,6 +95,11 @@ dvr resources
 catalogues without requiring an MCP host. Prompt arguments use the same
 parameter grammar as tool calls. Quote resource URIs that contain shell
 metacharacters such as `?`, `&`, or `#`.
+
+`describe TOOL ACTION` reports registered action help when present, then falls
+back to the tool's documented signature, and finally to an explicitly unknown,
+open parameter object. It never presents an inferred compound-action signature
+as a strict runtime JSON schema.
 
 ## Parameters
 
@@ -248,6 +255,36 @@ dvr advanced project_read report projectDb=/path/to/Project.db -o json |
   jq '.timelines'
 ```
 
+## Persistent JSONL session
+
+`dvr session` keeps one Python process, event loop, tool registries, and live
+Resolve proxy warm across sequential compound and granular requests. It is for
+low-latency shell coprocesses and request files; it deliberately does not run
+requests concurrently. Advanced Node actions remain ordinary `dvr advanced`
+calls and are not accepted inside this Python session.
+
+Each nonblank input line is either a direct request or a complete CLI `argv`
+request. Every line produces one correlated response envelope, and malformed or
+refused requests do not terminate the session:
+
+```jsonl
+{"id":"current","tool":"timeline","action":"get_current","params":{}}
+{"id":"items","tool":"timeline","action":"get_items","params":{"track_type":"video","index":1}}
+{"id":"granular","surface":"granular","tool":"get_project_unique_id","params":{}}
+{"id":"catalog","argv":["actions","timeline"]}
+{"id":"done","quit":true}
+```
+
+```bash
+dvr session <requests.jsonl >responses.jsonl
+jq -c 'select(.ok == false)' responses.jsonl
+```
+
+Responses contain `id`, `ok`, and either `result` or a structured `error` plus
+`exit_code`. A request cannot start another session or use `--input -`, because
+that would consume the protocol stream. Direct requests may set `yes:true` for
+the same exact-token confirmation replay used by ordinary `--yes` calls.
+
 ## Exit codes and `set -e`
 
 The universal CLI uses these statuses:
@@ -359,7 +396,10 @@ implementations through the CLI dispatcher.
 ## Shell completion
 
 Generate completion from the executable so it tracks the installed tool and
-action catalogue.
+action catalogue. Completion includes compound, granular, and advanced tool and
+action names; compound documented parameters, granular schema flags, and common
+enum values are completed where known. Advanced Zod parameter flags are not yet
+extracted.
 
 ```bash
 # Bash, current session
@@ -416,7 +456,7 @@ The mappings are:
 | Granular server tool + arguments | `dvr granular TOOL PARAM...` |
 | Advanced server tool + `action`, `args` | `dvr advanced TOOL ACTION PARAM...` |
 | List tools | `dvr tools --surface ...` |
-| Read schema/help | `dvr describe TOOL --surface ...` |
+| Read schema/help | `dvr describe TOOL [ACTION] --surface ...` |
 | List/call prompts | `dvr prompts`; `dvr prompt NAME PARAM...` |
 | List/read resources | `dvr resources`; `dvr resource URI` |
 | Start the old server | `dvr server` or `dvr server --full` |

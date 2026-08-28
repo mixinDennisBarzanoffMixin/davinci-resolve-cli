@@ -1,12 +1,14 @@
-# davinci-resolve-advanced-mcp
+# DaVinci Resolve advanced CLI engine
 
-The **beyond-the-API** half of `davinci-resolve-mcp`: a Node MCP server that authors and edits
+The **beyond-the-API** half of `davinci-resolve-cli`: a Node engine that authors and edits
 DaVinci Resolve **files** (`.drp` / `.drt` / `.drx`) and applies DB/XML-level changes (Fairlight
 routing, offline-reference, conform, color-group grade read) — **with no DaVinci Resolve running.**
 
-It ships as a second `bin` inside the `davinci-resolve-mcp` npm package (one install, two servers):
+It ships inside the public CLI fork. The primary shell entry is `dvr advanced`; MCP remains an
+optional compatibility transport:
 
 ```
+dvr advanced <tool> <action> ...       → direct Bash-composable CLI
 bin/davinci-resolve-mcp.mjs           → Python, live, sanctioned scripting API (drives Resolve)
 bin/davinci-resolve-advanced-mcp.mjs  → Node, beyond-API file/DB authoring (no Resolve required)   [this]
 ```
@@ -15,6 +17,7 @@ Runs cloud or local — the file tools never touch Resolve.
 
 ## Two ways to use it
 
+- **As a CLI engine** — `dvr advanced <tool> <action> key=value`.
 - **As an MCP server** (the bin above) — point any MCP client at it.
 - **As a library** — `import` the engine directly. The package exposes a public API surface
   (`server/lib.mjs`, wired via `package.json` `main`/`exports`), grouped as **codec** (offline
@@ -78,7 +81,12 @@ Each dispatches on an `action`. Highlights:
 
 - **`drx`** — per-clip grade (`.drx`) codec: `parse`, `generate`, `generate_from_request`,
   `export_cdl`, `merge`, plus the **grading/QC catalog** below.
-- **`drp` / `drt`** — project / timeline file authoring + editing + grade injection + structural diff.
+- **`drp` / `drt`** — project / timeline file authoring + editing + grade injection + structural diff;
+  transition inventory/validation, fixture-grounded centered Cross Dissolve placement, cloning of
+  verified existing centered transitions, duration changes, and non-ripple deletion.
+- **`fusion`** — declarative `.comp` generation plus reusable, duration-adaptive animated-caption
+  `.setting` templates with safe positions and fade/pop/punch entrances. Generated title assets
+  require Resolve import/render acceptance before production use.
 - **`conform`** — offline conform/relink QC engine (frame-oracle math, not filename matching),
   reverse-clip DB repair, sequence lineage store + diff, per-cut frame QC.
 - **`color_trace`** — cross-project clip matching → a trace plan for carrying grades across a re-conform.

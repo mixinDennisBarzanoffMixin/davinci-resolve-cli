@@ -1,6 +1,6 @@
 # Resolve Workflow Gap Audit
 
-Last reviewed: 2026-08-27
+Last reviewed: 2026-08-28
 
 ## What “100%” means
 
@@ -48,21 +48,39 @@ The first CLI layer is now implemented:
 dvr advanced captions parse inputPath=captions.srt
 dvr advanced captions write inputPath=captions.srt outputFormat=vtt outputPath=captions.vtt
 dvr advanced captions compose_native inputPath=captions.srt outputPath=captions.drt frameRate=24
+dvr edit_engine caption_qc --input @caption-request.json
+dvr edit_engine plan_caption_repairs --input @caption-blocks.json
+dvr edit_engine plan_caption_delivery --input @caption-request.json fps=24 format=srt preset=word-highlight
 dvr edit_engine plan_animated_captions --input @caption-request.json fps=24 track_index=3 preset=pop
 dvr edit_engine create_animated_captions --input @caption-request.json track_index=3 preset=pop fusion_template=Text+
+dvr advanced fusion generate_animated_caption_template outputPath=CaptionPop.setting entrance=pop position=lower-center
 ```
 
 `create_animated_captions` generates one editable nested Fusion title per cue on
 a chosen video track. `clean` and `pop` are implemented; `pop` writes Text+
 scale/opacity keyframes, and any installed Fusion title template can be selected.
-The planner, executor, rollback, and API readback have offline test coverage;
-the new batch workflow still needs its first live Resolve render acceptance run.
-`word-highlight` and `karaoke` produce exact word-cue plans but deliberately
-refuse generic execution until a word-aware Fusion template executor is present.
-These overlays are not an accessible native subtitle track. Native subtitle
-output is the separate `compose_native` DRT mode. Applying Resolve's stock
-Animated template to a subtitle-track header remains UI-only unless its
-version-specific project data is safely decoded and verified.
+`word-highlight` materializes exact active-word title segments and `karaoke`
+materializes cumulative title segments at every word start. These editable
+public-API fallbacks report that they are degraded from native per-character
+color/progress styling instead of claiming visual equivalence.
+
+The CLI also generates reusable `.setting` title macros with configurable fill,
+stroke, shadow, title-safe position, and duration-adaptive fade/pop/punch
+entrances driven by Fusion Anim Curves. Structural validation and install-folder
+guidance are included; Resolve import, Inspector mapping, and rendered pixels
+remain pending live acceptance. Fusion documents Anim Curves as duration-adaptive
+template animation in the [Fusion manual](https://documents.blackmagicdesign.com/UserManuals/FusionManual.pdf?_v=1724310010000).
+
+`caption_qc` audits overlap, gaps, flashes, long displays, line limits, orphan
+words, and reading speed. `plan_caption_repairs` only rewraps and uses available
+gaps—never deletes or paraphrases words; it may normalize surrounding whitespace.
+`plan_caption_delivery` derives an accessibility-capable SRT/VTT sidecar artifact
+and animated plan from one timing source. The returned text is not embedded or
+imported yet, and the overlays are not an accessible native subtitle track.
+Native subtitle-track output is the separate
+`compose_native` DRT mode. Applying Resolve's stock Animated template to a
+subtitle-track header remains UI-only unless its version-specific project data
+is safely decoded and verified.
 
 Every applied caption workflow should finish with frame/render verification.
 Resolve has accepted subtitle render settings without producing burn-in pixels,
@@ -76,23 +94,32 @@ duration setter for transitions. Existing transitions can be found as timeline
 items, inspected at a basic level, and deleted. The offline advanced layer can
 currently author only a centered Cross Dissolve.
 
-Live inspection and removal are now implemented; offline apply/clone remains:
+Live inspection/removal and the fixture-grounded offline workflow are now
+implemented:
 
 ```bash
 dvr timeline list_transitions track_type=video track_index=1
 dvr timeline transition_report track_type=video
 dvr timeline delete_transition transition_id=...   # confirmation-token gated
-dvr advanced drp place_transition drpPath=in.drp outputPath=out.drp track=1 atFrame=240 durationFrames=12
+dvr advanced drp place_transition drpPath=in.drp outputPath=out.drp track=1 atFrame=240 durationPreset=standard frameRate=24
+dvr advanced drp list_transitions drpPath=out.drp
+dvr advanced drp validate_transitions drpPath=out.drp
+dvr advanced drp clone_transition drpPath=out.drp outputPath=clone.drp sourceTransitionDbId=... atFrame=480
+dvr advanced drp set_transition_duration drpPath=clone.drp outputPath=retimed.drp transitionDbId=... durationSeconds=1 frameRate=24
+dvr advanced drp delete_transition drpPath=retimed.drp outputPath=clean.drp transitionDbId=...
 ```
 
 `transition_report` conservatively identifies transition timeline items and
 reports their track/range, neighboring cut, handle availability, and warnings.
 `delete_transition` only accepts an ID that passes the same discriminator and
-never ripples. Live creation and cloning remain impossible through the public
-API; the existing offline authoring path currently creates a centered Cross
-Dissolve. It still needs more validated types, new-timeline-version import,
-render proof, and readback. Arbitrary stock transitions must not be claimed
-until each encoded type has a live Resolve fixture.
+never ripples. Offline inventory fingerprints the opaque effect payload;
+arbitrary existing centered transitions can be cloned exactly,
+duration-adjusted, structurally validated, and non-ripple deleted without
+inventing their encoding. New synthesis remains limited to the centered Cross
+Dissolve captured from Resolve 21. Start/end alignment, audio transitions,
+source-handle proof, Resolve import acceptance, and render proof remain open.
+Arbitrary stock transition synthesis must not be claimed until each encoded
+type has a live Resolve fixture.
 
 Fusion transition templates and DCTL transition assets are worth supporting as
 versioned user-supplied inputs. Generating the asset is already possible; the
@@ -100,25 +127,24 @@ missing part is safely applying it at a cut.
 
 ## Priority 0: make the shell surface self-describing and fast
 
-The CLI exposes all handlers, but it is not yet a great shell *environment*:
-
-- `dvr describe timeline` describes the generic `{action, params}` wrapper,
-  not each action's parameters, defaults, enums, safety class, and result shape.
-- Shell completion currently completes top-level commands and compound tool
-  names, not actions, granular tools, parameters, or enum values.
-- stdin accepts one JSON request. JSONL is an output format, not a persistent
-  multi-request session, so each command starts a fresh Python process.
-
-The next CLI layer should add `dvr describe TOOL ACTION`, schema-backed
-completion, and a single-connection request loop such as:
+The next shell layer is implemented:
 
 ```bash
-dvr session --input-jsonl < requests.jsonl
-dvr map timeline_item get_name < item-requests.jsonl
+dvr describe timeline get_items
+source <(dvr completion bash)
+dvr session < requests.jsonl > results.jsonl
 ```
 
-Resolve calls should remain ordered by default; the application is not a safe
-target for blind parallel mutation.
+Action descriptions prefer registered help, fall back to documented signatures,
+and label unknown/open schemas honestly. Bash/zsh/fish completion discovers
+compound tools/actions/documented parameters, granular schema flags, advanced
+tool/action names, common enums, and output options dynamically. Advanced Zod
+parameter flags are not yet extracted. `dvr session` processes correlated
+compound/granular JSONL requests in one warm Python process and continues after
+per-line errors; advanced Node actions remain ordinary one-shot CLI calls.
+Resolve calls remain ordered because the application is not a safe target for
+blind parallel mutation. Remaining work is a generated completion cache, strict
+compound action schemas, and advanced Zod parameter completion.
 
 ## Other large Resolve-vs-API gaps
 
@@ -142,10 +168,11 @@ Useful official overviews:
 
 ## Recommended build order
 
-1. Live-import acceptance tests and render verification for native/animated captions;
-   add a calibrated word-aware Fusion template executor.
-2. Expand offline transition authoring beyond Cross Dissolve, with import/render/readback QC.
-3. Per-action schemas, real completion, and a persistent JSONL session.
+1. Live-import acceptance tests and render verification for native captions,
+   generated title templates, and exact word-timed overlay fallbacks.
+2. Capture import/render/readback fixtures for more transition types and
+   alignments; add source-handle verification.
+3. Strict compound action schemas, cached completion, and advanced Zod flags.
 4. A guarded full FusionScript dispatcher plus explicit Lua/Python escape hatch.
 5. One coherent “shadow edit” workflow: export, patch as a new timeline version,
    diff, import, verify, and rollback.

@@ -4,7 +4,9 @@
  * managed/API-backed build are intentionally omitted — this MCP has no API backend).
  *
  * Author: create_empty_project, assemble_timeline, add_media_clip
- * Place: place_fusion_title, place_generator, place_transition
+ * Place: place_fusion_title, place_generator, place_transition, clone_transition
+ * Edit transitions: set_transition_duration, delete_transition
+ * Inspect: transition_capabilities, list_transitions, validate_transitions
  * Edit: move_clip, delete_clip, trim_clip, trim_clip_head, split_clip, ripple_timeline
  * Media: relink_media, repoint_media
  * Grade: inject_grades, extract_node_graphs, diff
@@ -75,7 +77,59 @@ const S = {
     track: z.number().int().positive(),
     atFrame: z.number().int(),
     durationFrames: z.number().int().positive().optional(),
+    durationSeconds: z.number().positive().optional(),
+    durationPreset: z.enum(['subtle', 'standard', 'slow']).optional(),
+    frameRate: z.number().positive().optional(),
+    alignment: z.literal('center').optional(),
+    transitionType: z.literal('cross_dissolve').optional(),
     timelineUuid: sel.timelineUuid,
+  }),
+  transition_capabilities: z.object({}),
+  list_transitions: z.object({
+    drpPath: io.drpPath,
+    timelineUuid: sel.timelineUuid,
+    trackType: z.enum(['video', 'audio']).optional(),
+  }),
+  validate_transitions: z.object({
+    drpPath: io.drpPath,
+    timelineUuid: sel.timelineUuid,
+    trackType: z.enum(['video', 'audio']).optional(),
+  }),
+  clone_transition: z.object({
+    ...io,
+    timelineUuid: sel.timelineUuid,
+    trackType: z.enum(['video', 'audio']).optional(),
+    sourceTrack: z.number().int().positive().optional(),
+    sourceTransitionIndex: z.number().int().nonnegative().optional(),
+    sourceTransitionDbId: z.string().optional(),
+    targetTrack: z.number().int().positive().optional(),
+    atFrame: z.number().int(),
+    durationFrames: z.number().int().min(2).optional(),
+    durationSeconds: z.number().positive().optional(),
+    durationPreset: z.enum(['subtle', 'standard', 'slow']).optional(),
+    frameRate: z.number().positive().optional(),
+  }),
+  set_transition_duration: z.object({
+    ...io,
+    timelineUuid: sel.timelineUuid,
+    trackType: z.enum(['video', 'audio']).optional(),
+    track: z.number().int().positive().optional(),
+    transitionIndex: z.number().int().nonnegative().optional(),
+    transitionDbId: z.string().optional(),
+    durationFrames: z.number().int().min(2).optional(),
+    durationSeconds: z.number().positive().optional(),
+    durationPreset: z.enum(['subtle', 'standard', 'slow']).optional(),
+    frameRate: z.number().positive().optional(),
+  }).refine((p) => p.durationFrames != null || p.durationSeconds != null || p.durationPreset != null, {
+    message: 'one durationFrames, durationSeconds, or durationPreset value is required',
+  }),
+  delete_transition: z.object({
+    ...io,
+    timelineUuid: sel.timelineUuid,
+    trackType: z.enum(['video', 'audio']).optional(),
+    track: z.number().int().positive().optional(),
+    transitionIndex: z.number().int().nonnegative().optional(),
+    transitionDbId: z.string().optional(),
   }),
   move_clip: z.object({ ...io, fromTrack: z.number().int().positive(), toTrack: z.number().int().positive(), toStart: z.number().int().optional(), ...sel }),
   delete_clip: z.object({ ...io, fromTrack: z.number().int().positive(), ripple: z.boolean().optional(), ...sel }),
@@ -129,7 +183,7 @@ async function writeOp(fnName, drpPath, opts, outputPath) {
 export const drpTool = {
   name: 'drp',
   description:
-    'DaVinci Resolve project (.drp) authoring + editing — offline, no Resolve required. Actions: create_empty_project, assemble_timeline, add_media_clip, place_fusion_title, place_generator, place_transition, move_clip, delete_clip, trim_clip, trim_clip_head, split_clip, ripple_timeline, relink_media, repoint_media, inject_grades, extract_node_graphs, extract_group_grades, diff, extract_lut_refs, list_nested, read_nested, read_nested_titles, set_nested_title_text.',
+    'DaVinci Resolve project (.drp) authoring + editing — offline, no Resolve required. Actions: create_empty_project, assemble_timeline, add_media_clip, place_fusion_title, place_generator, place_transition, transition_capabilities, list_transitions, validate_transitions, clone_transition, set_transition_duration, delete_transition, move_clip, delete_clip, trim_clip, trim_clip_head, split_clip, ripple_timeline, relink_media, repoint_media, inject_grades, extract_node_graphs, extract_group_grades, diff, extract_lut_refs, list_nested, read_nested, read_nested_titles, set_nested_title_text.',
   async handler({ action, args }) {
     const gen = drp();
 
@@ -166,6 +220,35 @@ export const drpTool = {
       const p = S.place_transition.parse(args);
       const { drpPath, outputPath, ...opts } = p;
       return writeOp('placeTransition', drpPath, opts, outputPath);
+    }
+    if (action === 'transition_capabilities') {
+      S.transition_capabilities.parse(args);
+      return gen.transitionCapabilities();
+    }
+    if (action === 'list_transitions') {
+      const p = S.list_transitions.parse(args);
+      const { drpPath, ...opts } = p;
+      return gen.listTransitions(drpPath, opts);
+    }
+    if (action === 'validate_transitions') {
+      const p = S.validate_transitions.parse(args);
+      const { drpPath, ...opts } = p;
+      return gen.validateTransitions(drpPath, opts);
+    }
+    if (action === 'clone_transition') {
+      const p = S.clone_transition.parse(args);
+      const { drpPath, outputPath, ...opts } = p;
+      return writeOp('cloneTransition', drpPath, opts, outputPath);
+    }
+    if (action === 'set_transition_duration') {
+      const p = S.set_transition_duration.parse(args);
+      const { drpPath, outputPath, ...opts } = p;
+      return writeOp('setTransitionDuration', drpPath, opts, outputPath);
+    }
+    if (action === 'delete_transition') {
+      const p = S.delete_transition.parse(args);
+      const { drpPath, outputPath, ...opts } = p;
+      return writeOp('deleteTransition', drpPath, opts, outputPath);
     }
     if (action === 'move_clip') {
       const p = S.move_clip.parse(args);

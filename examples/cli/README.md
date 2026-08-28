@@ -12,6 +12,11 @@ for Bash 4+ with `jq` installed.
   tool/action intentionally.
 - `timeline-query.json` is a minimal `@file` request for a read-only compound
   call.
+- `caption-request.json` contains exact word timings shared by a native caption
+  sidecar and animated Fusion overlays.
+- `caption-workflow.sh` plans the dual delivery, blocks on hard caption-QC
+  errors, writes the SRT sidecar, and then enters the normal confirmed Resolve
+  mutation flow for the title overlays.
 
 Run from anywhere after installing/linking the CLI:
 
@@ -19,6 +24,7 @@ Run from anywhere after installing/linking the CLI:
 bash examples/cli/resolve-inventory.sh
 bash examples/cli/inspect-items.sh >items.jsonl
 dvr timeline get_items --input @examples/cli/timeline-query.json
+bash examples/cli/caption-workflow.sh
 ```
 
 The scripts never write to source media. Review the confirmation template before

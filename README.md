@@ -5,7 +5,7 @@ English | [简体中文](README.zh-CN.md)
 [![Version](https://img.shields.io/badge/upstream-2.103.2-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
 [![API Coverage](https://img.shields.io/badge/API%20Coverage-100%25-brightgreen.svg)](docs/reference/api-coverage.md)
 [![CLI](https://img.shields.io/badge/CLI-36%20compound%20%7C%20353%20granular-blue.svg)](#cli-surfaces)
-[![Advanced](https://img.shields.io/badge/Advanced-19%20tools%20%7C%20154%20actions-blueviolet.svg)](#cli-surfaces)
+[![Advanced](https://img.shields.io/badge/Advanced-19%20tools%20%7C%20163%20actions-blueviolet.svg)](#cli-surfaces)
 [![Tested](https://img.shields.io/badge/Live%20Tested-93.6%25-green.svg)](docs/reference/api-coverage.md#test-results)
 [![DaVinci Resolve](https://img.shields.io/badge/DaVinci%20Resolve-18.5+-darkred.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
@@ -14,7 +14,7 @@ English | [简体中文](README.zh-CN.md)
 A complete, Bash-composable command-line environment for DaVinci Resolve. It
 exposes the upstream project's entire implementation directly: 36 guarded
 compound tools, 353 one-method granular tools, 19 offline advanced tools with
-154 actions, 14 prompts, and every concrete or templated resource. MCP remains
+163 actions, 14 prompts, and every concrete or templated resource. MCP remains
 available as an optional compatibility transport; it is no longer required to
 use Resolve automation from a terminal, script, cron job, or CI worker.
 
@@ -75,15 +75,34 @@ dvr advanced captions compose_native inputPath=captions.srt outputPath=captions.
 # Timed words → editable Fusion title overlays on V3 with Text+ pop keyframes
 dvr edit_engine create_animated_captions --input @caption-request.json track_index=3 preset=pop
 
-# Inspect existing transitions with cut/handle context; deletion is confirm-gated
+# One source of timing truth → SRT/VTT + caption QC + matching animated plan
+dvr edit_engine plan_caption_delivery --input @caption-request.json format=srt
+
+# Generate a reusable duration-adaptive Fusion title template (.setting)
+dvr advanced fusion generate_animated_caption_template outputPath=CaptionPop.setting entrance=pop position=lower-center
+
+# Inspect live transitions; author a validated offline Cross Dissolve by preset
 dvr timeline transition_report track_type=video track_index=1
+dvr advanced drp place_transition drpPath=in.drp outputPath=out.drp track=1 atFrame=240 durationPreset=standard frameRate=24
 ```
 
 `caption-request.json` is an object containing `words` (timed word objects) or
-`blocks` (timed caption blocks). Animated captions are Fusion title overlays,
-not an accessibility subtitle stream; keep or import the native caption track
-when delivery requires one. Resolve's public API still cannot create a live
-transition or attach its native word-aware Animated effect to a subtitle track.
+`blocks` (timed caption blocks). Caption QC and conservative repair planning are
+available as `caption_qc` and `plan_caption_repairs`. `word-highlight` executes
+as exact active-word title segments, while `karaoke` builds cumulative timed
+segments; results explicitly flag that these public-API fallbacks do not provide
+Resolve's native per-glyph styling. Animated captions remain Fusion title
+overlays, not an accessibility subtitle stream, so keep or import the matched
+native caption delivery. Resolve's public API still cannot create a live
+transition or attach its native Animated effect to a subtitle track.
+
+Shell discovery and automation are action-aware and connection-efficient:
+
+```bash
+dvr describe timeline get_items
+source <(dvr completion bash)           # all tools/actions; Python schema/doc flags
+dvr session <requests.jsonl >results.jsonl  # warm sequential compound/granular process
+```
 
 See the [Bash CLI guide](docs/cli/bash-cli.md) for the full grammar, pipelines,
 exit codes, completions, confirmation flow, and MCP-to-CLI migration. The
@@ -167,7 +186,7 @@ The command starts a loopback-only server and opens the control panel in your br
 |---|---|---:|---|
 | Compound | `dvr TOOL ACTION ...` | 36 tools | Usually |
 | Granular | `dvr granular TOOL ...` | 353 tools | Usually |
-| Advanced | `dvr advanced TOOL ACTION ...` | 19 tools / 154 actions | No |
+| Advanced | `dvr advanced TOOL ACTION ...` | 19 tools / 163 actions | No |
 | Prompts/resources | `dvr prompts`, `dvr resources` | 14 prompts / 37 resource entries | Depends on item |
 | Durable batch | `dvr batch ...` | analysis jobs + project specs | Depends on command |
 

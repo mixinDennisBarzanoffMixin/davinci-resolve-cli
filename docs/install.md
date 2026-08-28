@@ -58,21 +58,23 @@ Validated live coverage is based on **DaVinci Resolve 19.1.3 Studio** for the or
 ## Quick Start
 
 ```bash
-# Make sure DaVinci Resolve Studio is running, then:
-npx davinci-resolve-mcp setup
+# Make sure DaVinci Resolve Studio is running, then install the public CLI fork:
+git clone https://github.com/mixinDennisBarzanoffMixin/davinci-resolve-cli.git
+cd davinci-resolve-cli
+npm install
+npm link
+dvr setup --clients manual
+dvr doctor
 ```
 
-The npm launcher installs a managed copy in your user application-data directory
-and then runs the universal Python installer from there. MCP client configs point
-directly at the managed Python virtual environment and `src/server.py`, so Node
-is not required after setup.
+The `dvr` launcher installs a managed copy in your user application-data
+directory and then runs the universal Python installer from there. MCP client
+configs point directly at the managed Python virtual environment and
+`src/server.py`; ordinary CLI calls use the same implementations directly.
 
-For source installs:
+To invoke the universal installer directly instead:
 
 ```bash
-git clone https://github.com/samuelgursky/davinci-resolve-mcp.git
-cd davinci-resolve-mcp
-
 python install.py
 ```
 
@@ -114,19 +116,19 @@ You can configure multiple clients at once, or use `--clients manual` to get cop
 For [Autohand Code](https://github.com/autohandai/code-cli/), register the managed launcher after setup:
 
 ```bash
-autohand mcp add davinci-resolve npx davinci-resolve-mcp server
+autohand mcp add davinci-resolve dvr server
 ```
 
-Autohand adds npx's `-y` flag automatically. Add `--scope project` after `mcp add` to keep the registration in the current workspace.
+Add `--scope project` after `mcp add` to keep the registration in the current workspace.
 
 ### Installer Options
 
 ```bash
-npx davinci-resolve-mcp setup                 # Interactive npm setup
-npx davinci-resolve-mcp setup --clients all   # Configure all clients
-npx davinci-resolve-mcp doctor                # Dry-run environment/config check
-npx davinci-resolve-mcp server                # Launch the managed MCP server
-npx davinci-resolve-mcp control-panel         # Launch the local control panel
+dvr setup                                      # Interactive setup
+dvr setup --clients all                        # Configure all clients
+dvr doctor                                     # Dry-run environment/config check
+dvr server                                     # Launch the optional managed MCP server
+dvr control-panel                              # Launch the local control panel
 
 python install.py                              # Interactive mode
 python install.py --clients all                # Configure all clients

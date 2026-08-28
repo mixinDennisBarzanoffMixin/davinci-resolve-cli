@@ -374,7 +374,7 @@ class AdvancedCliParityTests(unittest.TestCase):
         self.assertTrue(payload["sameHandlers"])
         self.assertTrue(payload["mapMatches"])
         self.assertEqual(len(names), 19)
-        self.assertEqual(sum(len(row["actions"]) for row in rows), 154)
+        self.assertEqual(sum(len(row["actions"]) for row in rows), 163)
         self.assertEqual(len(names), len(set(names)), "duplicate advanced tool names")
         self.assertTrue(all(row["description"] for row in rows))
         self.assertTrue(all(row["actions"] for row in rows))

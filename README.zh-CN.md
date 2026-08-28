@@ -2,11 +2,10 @@
 
 [English](README.md) | 简体中文
 
-[![Version](https://img.shields.io/badge/version-2.103.2-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
-[![npm](https://img.shields.io/npm/v/davinci-resolve-mcp.svg?label=npm&color=CB3837)](https://www.npmjs.com/package/davinci-resolve-mcp)
+[![Version](https://img.shields.io/badge/upstream-2.103.2-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
 [![API Coverage](https://img.shields.io/badge/API%20Coverage-100%25-brightgreen.svg)](docs/reference/api-coverage.md)
 [![Tools](https://img.shields.io/badge/MCP%20Tools-36%20(353%20full)-blue.svg)](#服务器模式)
-[![Advanced](https://img.shields.io/badge/Advanced%20(offline)-19%20tools-blueviolet.svg)](#服务器模式)
+[![Advanced](https://img.shields.io/badge/Advanced-19%20tools%20%7C%20163%20actions-blueviolet.svg)](#服务器模式)
 [![Tested](https://img.shields.io/badge/Live%20Tested-93.6%25-green.svg)](docs/reference/api-coverage.md#test-results)
 [![DaVinci Resolve](https://img.shields.io/badge/DaVinci%20Resolve-18.5+-darkred.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
@@ -25,16 +24,19 @@
 ## 快速开始
 
 ```bash
-npx davinci-resolve-mcp setup
+git clone https://github.com/mixinDennisBarzanoffMixin/davinci-resolve-cli.git
+cd davinci-resolve-cli
+npm install
+npm link
+dvr setup --clients manual
+dvr doctor
 ```
 
 连接之前，先打开 DaVinci Resolve Studio，把 **Preferences > General > External scripting using** 设为 **Local**。（**免费版**上这个偏好设置不起作用——见下文 [免费版](#免费版应用内桥接)。）npm 启动器会在你的用户应用数据目录下安装一份托管副本，然后运行通用 Python 安装器。安装器会创建虚拟环境、检测 Resolve 路径，并可自动配置 Claude Desktop、Claude Code、Cursor、VS Code、Windsurf、Zed、Continue、Cline、Roo Code、OpenCode、Codex CLI 和 JetBrains 系列 IDE。
 
-从源码安装：
+也可以直接运行通用 Python 安装器：
 
 ```bash
-git clone https://github.com/samuelgursky/davinci-resolve-mcp.git
-cd davinci-resolve-mcp
 python install.py
 ```
 

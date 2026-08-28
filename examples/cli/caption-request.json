@@ -1,0 +1,11 @@
+{
+  "fps": 24,
+  "timeline_start_frame": 86400,
+  "track_index": 3,
+  "preset": "word-highlight",
+  "words": [
+    {"word": "Shell", "start_seconds": 0.0, "end_seconds": 0.35},
+    {"word": "composable", "start_seconds": 0.4, "end_seconds": 0.95},
+    {"word": "captions", "start_seconds": 1.0, "end_seconds": 1.45}
+  ]
+}

@@ -34,8 +34,36 @@ function splitItems(itemsInner) {
 
 const TEMPLATE_PATH = path.join(__dirname, 'templates', 'transition-cross-dissolve.xml');
 
+// Time-based presets intentionally resolve through the caller's frame rate.  They are
+// convenience durations, not claims about additional Resolve transition encodings.
+const DURATION_PRESETS_SECONDS = Object.freeze({
+  subtle: 0.25,
+  standard: 0.5,
+  slow: 1,
+});
+
 const clipStart = (c) => { const m = c.match(/<Start>(\d+)<\/Start>/); return m ? parseInt(m[1], 10) : null; };
 const clipDuration = (c) => { const m = c.match(/<Duration>(\d+)<\/Duration>/); return m ? parseInt(m[1], 10) : null; };
+
+function resolveTransitionDuration(opts = {}) {
+  const supplied = [opts.durationFrames != null, opts.durationSeconds != null, opts.durationPreset != null].filter(Boolean).length;
+  if (supplied > 1) throw new TypeError('placeTransition: choose only one of durationFrames, durationSeconds, or durationPreset');
+  if (opts.durationFrames != null) {
+    if (!Number.isInteger(opts.durationFrames) || opts.durationFrames < 2) throw new TypeError('placeTransition: durationFrames must be an integer >= 2');
+    return { durationFrames: opts.durationFrames, durationSource: 'frames' };
+  }
+  if (opts.durationSeconds != null || opts.durationPreset != null) {
+    if (!Number.isFinite(opts.frameRate) || opts.frameRate <= 0) throw new TypeError('placeTransition: frameRate > 0 is required for seconds/preset durations');
+    const seconds = opts.durationPreset != null ? DURATION_PRESETS_SECONDS[opts.durationPreset] : opts.durationSeconds;
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      const suffix = opts.durationPreset != null ? `unknown durationPreset "${opts.durationPreset}"` : 'durationSeconds must be > 0';
+      throw new TypeError(`placeTransition: ${suffix}`);
+    }
+    const durationFrames = Math.max(2, Math.round(seconds * opts.frameRate));
+    return { durationFrames, durationSeconds: seconds, frameRate: opts.frameRate, durationSource: opts.durationPreset ? `preset:${opts.durationPreset}` : 'seconds' };
+  }
+  return { durationFrames: 24, durationSource: 'default:24-frames' };
+}
 
 /**
  * Insert a cross-dissolve at an abutting clip boundary.
@@ -51,11 +79,14 @@ const clipDuration = (c) => { const m = c.match(/<Duration>(\d+)<\/Duration>/); 
  *   atFrame:number, start:number, durationFrames:number, transitionDbId:string|null}>}
  */
 async function placeTransition(drpInput, opts = {}) {
-  const { track, atFrame, durationFrames = 24, trackType = 'video', timelineUuid } = opts;
+  const { track, atFrame, trackType = 'video', timelineUuid, alignment = 'center', transitionType = 'cross_dissolve' } = opts;
+  const duration = resolveTransitionDuration(opts);
+  const { durationFrames } = duration;
   if (!Number.isInteger(track) || track < 1) throw new TypeError('placeTransition: track must be a positive integer');
   if (!Number.isInteger(atFrame)) throw new TypeError('placeTransition: atFrame must be an integer');
-  if (!Number.isInteger(durationFrames) || durationFrames < 2) throw new TypeError('placeTransition: durationFrames must be an integer >= 2');
   if (trackType !== 'video') throw new Error('placeTransition: only video cross-dissolve is supported (no bundled audio template)');
+  if (alignment !== 'center') throw new Error('placeTransition: only center alignment is fixture-verified');
+  if (transitionType !== 'cross_dissolve') throw new Error('placeTransition: only cross_dissolve has a bundled Resolve-authored fixture; clone an existing project transition instead');
 
   const zip = await loadDrpZip(drpInput);
   const { entry, xml: seqXml, seqId } = await selectTargetSeq(zip, timelineUuid);
@@ -71,6 +102,19 @@ async function placeTransition(drpInput, opts = {}) {
   }
   if (leftIdx < 0) throw new Error(`placeTransition: no abutting clip boundary at frame ${atFrame} on track ${track}`);
 
+  // `splitItems` intentionally returns only clips, so an existing transition
+  // between the same pair must be checked in the original XML span. Otherwise
+  // the clips still look adjacent and a second transition can be inserted at
+  // an already occupied cut.
+  const leftPos = items.indexOf(clips[leftIdx]);
+  const rightPos = items.indexOf(clips[leftIdx + 1], leftPos + clips[leftIdx].length);
+  const between = rightPos >= 0
+    ? items.slice(leftPos + clips[leftIdx].length, rightPos)
+    : '';
+  if (/<Sm2TiTransition\b/.test(between)) {
+    throw new Error(`placeTransition: cut at frame ${atFrame} on track ${track} already has a transition`);
+  }
+
   let trans = fs.readFileSync(TEMPLATE_PATH, 'utf8').trim();
   trans = freshDbIds(trans);
   const start = atFrame - Math.floor(durationFrames / 2); // centered (AlignmentType 2)
@@ -85,7 +129,12 @@ async function placeTransition(drpInput, opts = {}) {
   const xml = replaceTrackVec(seqXml, trackType, vec, tracks);
   zip.file(entry, xml);
   const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
-  return { buffer, entry, timelineUuid: seqId, track, atFrame, start, durationFrames, transitionDbId };
+  return {
+    buffer, entry, timelineUuid: seqId, track, atFrame, start, durationFrames, transitionDbId,
+    transitionType, alignment, ...duration,
+    fixture: 'Resolve 21 GUI-authored Cross Dissolve',
+    liveRoundTripRequired: true,
+  };
 }
 
-module.exports = { placeTransition, TEMPLATE_PATH };
+module.exports = { placeTransition, TEMPLATE_PATH, DURATION_PRESETS_SECONDS, resolveTransitionDuration };
