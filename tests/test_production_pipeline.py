@@ -356,6 +356,14 @@ class ResearchPromptTest(unittest.TestCase):
 
 
 class ProductionCliContractTest(unittest.TestCase):
+    def test_broll_ideate_accepts_generated_only_gap_pass(self):
+        args = production_cli._parser().parse_args([
+            "broll", "ideate", "--project-dir", "/tmp/project", "--generated-only",
+            "--visual-types", "generated_image,diagram", "--visual-types", "motion_graphic",
+        ])
+        self.assertTrue(args.generated_only)
+        self.assertEqual(args.visual_types, ["generated_image,diagram", "motion_graphic"])
+
     def test_research_command_enables_codex_web_search(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

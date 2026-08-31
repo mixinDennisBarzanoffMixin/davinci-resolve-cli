@@ -650,26 +650,36 @@ def _cmd_apply_aroll(args: argparse.Namespace) -> Dict[str, Any]:
 
 def _cmd_remotion(args: argparse.Namespace) -> Dict[str, Any]:
     root = Path(args.project_dir).resolve()
+    manifest_value = getattr(args, "manifest", None)
+    manifest = Path(str(manifest_value or "remotion.json")).expanduser()
+    manifest = manifest.resolve() if manifest.is_absolute() else (root / manifest).resolve()
+    if not manifest.is_file() and not args.print_command:
+        raise pipeline.ProductionPipelineError(f"Remotion manifest does not exist: {manifest}")
     remotion_root = Path(
         os.environ.get("DVR_REMOTION_ROOT") or Path(__file__).resolve().parents[1] / "remotion"
     ).resolve()
     if args.action == "studio":
-        command = ["npm", "--prefix", str(remotion_root), "run", "studio", "--", "--props", str(root / "remotion.json")]
+        command = ["npm", "--prefix", str(remotion_root), "run", "studio", "--", "--props", str(manifest)]
     elif args.action == "render":
         output = root / "broll-renders"
         output.mkdir(parents=True, exist_ok=True)
-        command = ["npm", "--prefix", str(remotion_root), "run", "render-segments", "--", str(root / "remotion.json"), str(output)]
+        command = ["npm", "--prefix", str(remotion_root), "run", "render-segments", "--", str(manifest), str(output)]
     else:
         command = [
             "npm", "--prefix", str(remotion_root), "run", "render-captions", "--",
-            str(root / "remotion.json"), str(root / "captions-overlay.mov"),
+            str(manifest), str(root / "captions-overlay.mov"),
         ]
     if args.print_command:
-        return {"command": command}
+        return {"command": command, "manifest": str(manifest)}
     completed = subprocess.run(command, stdout=sys.stderr, stderr=sys.stderr, check=False)
     if completed.returncode != 0:
         raise pipeline.ProductionPipelineError(f"Remotion {args.action} failed")
-    return {"success": True, "action": args.action, "project_dir": str(root)}
+    return {
+        "success": True,
+        "action": args.action,
+        "project_dir": str(root),
+        "manifest": str(manifest),
+    }
 
 
 def _cmd_attach_asset(args: argparse.Namespace) -> Dict[str, Any]:
@@ -815,6 +825,588 @@ def _cmd_import_broll(args: argparse.Namespace) -> Dict[str, Any]:
     ):
         raise pipeline.ProductionPipelineError(f"B-roll timeline placement failed: {appended}")
     return {**plan, "dry_run": False, "import": imported, "append": appended}
+
+
+def _cmd_music_search(args: argparse.Namespace) -> Dict[str, Any]:
+    """Discover music metadata only; never download or import media."""
+
+    from src.utils import music_discovery
+
+    root = Path(args.project_dir).expanduser().resolve()
+    if not root.is_dir():
+        raise pipeline.ProductionPipelineError(f"production project does not exist: {root}")
+    output = Path(args.output).expanduser().resolve() if args.output else root / "music-options.json"
+
+    production = {}
+    production_path = root / "production.json"
+    if production_path.is_file():
+        candidate = pipeline.read_json(production_path)
+        if isinstance(candidate, dict):
+            production = candidate
+    timeline_duration = None
+    timeline_path = root / "timeline.json"
+    if timeline_path.is_file():
+        timeline = pipeline.read_json(timeline_path)
+        if isinstance(timeline, dict) and isinstance(timeline.get("duration_seconds"), (int, float)):
+            timeline_duration = float(timeline["duration_seconds"])
+    target_duration = args.target_duration if args.target_duration is not None else timeline_duration
+
+    try:
+        result = music_discovery.search_openverse(
+            categories=args.category,
+            moods=args.mood,
+            genres=args.genre,
+            instruments=args.instrument,
+            keywords=args.keyword,
+            energy=args.energy,
+            instrumental_only=not args.with_vocals,
+            license_profile=args.license_profile,
+            licenses=args.license,
+            min_duration=args.min_duration,
+            max_duration=args.max_duration,
+            target_duration=target_duration,
+            limit=args.limit,
+            per_query=args.per_query,
+            seed=args.seed,
+            timeout=args.timeout,
+        )
+    except music_discovery.MusicDiscoveryError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+
+    result["production_context"] = {
+        "project_root": str(root),
+        "subject": production.get("subject"),
+        "listing_url": production.get("listing_url"),
+        "timeline_duration_seconds": timeline_duration,
+    }
+    result["artifact"] = str(output)
+    pipeline.write_json(output, result)
+    return result
+
+
+def _cmd_music_select(args: argparse.Namespace) -> Dict[str, Any]:
+    """Shortlist one option while preserving the explicit license gate."""
+
+    from src.utils import music_discovery
+
+    root = Path(args.project_dir).expanduser().resolve()
+    if not root.is_dir():
+        raise pipeline.ProductionPipelineError(f"production project does not exist: {root}")
+    options_path = Path(args.options).expanduser().resolve() if args.options else root / "music-options.json"
+    if not options_path.is_file():
+        raise pipeline.ProductionPipelineError(f"music options manifest does not exist: {options_path}")
+    output = Path(args.output).expanduser().resolve() if args.output else root / "music-selection.json"
+    manifest = pipeline.read_json(options_path)
+    if not isinstance(manifest, dict):
+        raise pipeline.ProductionPipelineError("music options manifest must be a JSON object")
+    try:
+        result = music_discovery.select_option(
+            manifest,
+            args.track_id,
+            confirm_source_license=args.confirm_source_license,
+            reviewer=args.reviewer,
+            verified_source_page=args.verified_source_page,
+            verified_license_code=args.verified_license,
+            verification_notes=args.notes,
+        )
+    except music_discovery.MusicDiscoveryError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    result["options_manifest"] = str(options_path)
+    result["artifact"] = str(output)
+    pipeline.write_json(output, result)
+    return result
+
+
+def _broll_project_root(value: str) -> Path:
+    root = Path(value).expanduser().resolve()
+    if not root.is_dir() or not (root / "production.json").is_file():
+        raise pipeline.ProductionPipelineError(f"production project does not exist: {root}")
+    (root / "broll").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _project_artifact(root: Path, value: Any, fallback: str) -> Path:
+    path = Path(str(value or fallback)).expanduser()
+    return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
+def _cmd_broll_context(args: argparse.Namespace) -> Dict[str, Any]:
+    """Build a role-preserving A1/A2/research/source-event context."""
+
+    from src.utils import broll_ideation
+    from src.utils import broll_pipeline
+    from src.utils import source_cutaways
+
+    root = _broll_project_root(args.project_dir)
+    production = pipeline.read_json(root / "production.json")
+    a1_path = _project_artifact(root, args.a1 or production.get("caption_transcript"), "transcript/transcript.json")
+    a2_path = _project_artifact(root, args.a2 or production.get("edit_transcript"), "guide-transcript/transcript.json")
+    research_path = _project_artifact(root, args.research or production.get("research"), "research.json")
+    if args.chunks:
+        chunks_path = _project_artifact(root, args.chunks, "chunks.json")
+    else:
+        variant_path = root / "a-roll-variant.json"
+        variant = pipeline.read_json(variant_path) if variant_path.is_file() else {}
+        chunks_path = _project_artifact(
+            root,
+            ((((variant.get("provenance") or {}).get("chunks") or {}).get("path")) or production.get("chunks")),
+            "chunks.json",
+        )
+    source_events_path = _project_artifact(root, args.source_events, "broll/source-events.json")
+    required = [a1_path, a2_path, research_path, chunks_path, source_events_path, root / "timeline.json"]
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise pipeline.ProductionPipelineError(f"required B-roll artifact is missing: {missing[0]}")
+
+    a1 = pipeline.read_json(a1_path)
+    a2 = pipeline.read_json(a2_path)
+    research = pipeline.read_json(research_path)
+    chunks = pipeline.read_json(chunks_path)
+    source_events_artifact = pipeline.read_json(source_events_path)
+    snapshot = pipeline.read_json(root / "timeline.json")
+    if source_events_artifact.get("source_snapshot_sha256") != source_cutaways.canonical_sha256(snapshot):
+        raise pipeline.ProductionPipelineError("frame-reviewed source events are stale for timeline.json")
+    freshness = broll_ideation.validate_research_freshness(
+        research,
+        volatile_max_age_hours=args.volatile_max_age_hours,
+    )
+    if not freshness["success"] and not args.allow_stale_research:
+        raise pipeline.ProductionPipelineError(
+            "volatile research is stale or undated; rerun research or pass --allow-stale-research for ideation only"
+        )
+    try:
+        reviewed_events = broll_pipeline.normalize_reviewed_source_events(source_events_artifact)
+        context = broll_ideation.build_broll_context(
+            a1,
+            a2,
+            research,
+            chunks=chunks,
+            source_events=reviewed_events,
+            guide_lookback_seconds=args.guide_lookback,
+            guide_lookahead_seconds=args.guide_lookahead,
+        )
+    except (broll_pipeline.BrollPipelineError, broll_ideation.BrollIdeationError) as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    context["artifact_paths"] = {
+        "a1": str(a1_path),
+        "a2": str(a2_path),
+        "research": str(research_path),
+        "chunks": str(chunks_path),
+        "source_events": str(source_events_path),
+        "timeline": str((root / "timeline.json").resolve()),
+    }
+    context["research_freshness"] = freshness
+    output = _project_artifact(root, args.output, "broll/context.json")
+    schema_path = root / "broll" / "candidate-run.schema.json"
+    prompt_path = root / "broll" / "agent-prompt.txt"
+    pipeline.write_json(output, context)
+    pipeline.write_json(schema_path, broll_pipeline.candidate_output_schema())
+    pipeline.write_text(
+        prompt_path,
+        broll_pipeline.build_agent_prompt(context, candidates_per_agent=args.candidates_per_agent) + "\n",
+    )
+    return {
+        "success": True,
+        "context": str(output),
+        "context_sha256": broll_ideation.payload_sha256(context),
+        "candidate_schema": str(schema_path),
+        "agent_prompt": str(prompt_path),
+        "moment_count": len(context.get("moments") or []),
+        "frame_reviewed_source_event_count": len(context.get("source_events") or []),
+        "roles": context.get("roles"),
+        "research_freshness": freshness,
+        "source_media_modified": False,
+    }
+
+
+def _cmd_broll_ideate(args: argparse.Namespace) -> Dict[str, Any]:
+    """Plan or run bounded, independently-seeded Codex ideators."""
+
+    import secrets
+
+    from src.utils import broll_agent_runner
+    from src.utils import broll_ideation
+    from src.utils import broll_pipeline
+
+    root = _broll_project_root(args.project_dir)
+    context_path = _project_artifact(root, args.context, "broll/context.json")
+    if not context_path.is_file():
+        raise pipeline.ProductionPipelineError("build B-roll context first")
+    context = pipeline.read_json(context_path)
+    try:
+        prompt = broll_pipeline.build_agent_prompt(
+            context,
+            candidates_per_agent=args.candidates_per_agent,
+            generated_only=bool(args.generated_only),
+            visual_types=args.visual_types,
+        )
+    except broll_pipeline.BrollPipelineError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    schema_path = root / "broll" / "candidate-run.schema.json"
+    if not schema_path.is_file():
+        pipeline.write_json(schema_path, broll_pipeline.candidate_output_schema())
+    seed = args.seed if args.seed is not None else secrets.randbits(63)
+    try:
+        plan = broll_agent_runner.plan_agent_run(
+            project_dir=root,
+            prompt=prompt,
+            output_schema=schema_path,
+            output_dir=root / "broll" / "agent-runs",
+            agent_count=args.agents,
+            seed=seed,
+            minimum_successes=args.minimum_successes,
+            creative_lenses=(
+                broll_ideation.GENERATED_ONLY_AGENT_ROLES
+                if args.generated_only
+                else broll_ideation.DEFAULT_AGENT_ROLES
+            ),
+            extra_args=("--search",) if args.search else (),
+        )
+    except broll_agent_runner.BrollAgentRunnerError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    if not args.run:
+        return {**plan, "next_step": "rerun with --run to launch the bounded ideators"}
+
+    def progress(event: Dict[str, Any]) -> None:
+        sys.stderr.write(json.dumps(event, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
+
+    try:
+        result = broll_agent_runner.run_agent_jobs(
+            plan,
+            max_workers=args.max_workers,
+            timeout_seconds=args.timeout,
+            progress=progress,
+        )
+    except broll_agent_runner.BrollAgentRunnerError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    artifact = Path(plan["output_dir"]) / "run.json"
+    pipeline.write_json(artifact, result)
+    return {**result, "artifact": str(artifact), "context": str(context_path)}
+
+
+def _cmd_broll_select(args: argparse.Namespace) -> Dict[str, Any]:
+    """Validate, deduplicate, and seed-select source-first candidate treatments."""
+
+    import secrets
+
+    from src.utils import broll_pipeline
+    from src.utils import broll_ideation
+    from src.utils import source_cutaways
+
+    root = _broll_project_root(args.project_dir)
+    context_path = _project_artifact(root, args.context, "broll/context.json")
+    if not context_path.is_file():
+        raise pipeline.ProductionPipelineError("build B-roll context first")
+    context = pipeline.read_json(context_path)
+    agent_run = None
+    if args.agent_run:
+        agent_path = Path(args.agent_run).expanduser().resolve()
+        if not agent_path.is_file():
+            raise pipeline.ProductionPipelineError(f"agent run does not exist: {agent_path}")
+        agent_run = pipeline.read_json(agent_path)
+    elif not args.source_only:
+        raise pipeline.ProductionPipelineError("provide --agent-run or explicitly choose --source-only")
+    selection_seed = args.seed if args.seed is not None else secrets.token_hex(16)
+    try:
+        selection = broll_pipeline.synthesize_selection(
+            context,
+            agent_run,
+            max_candidates=args.max_candidates,
+            quality_floor=args.quality_floor,
+            diversity=args.diversity,
+            seed=selection_seed,
+        )
+        image_jobs = broll_pipeline.image_job_manifest(
+            selection,
+            variations=args.image_variations,
+            seed=args.image_seed,
+        )
+        placements = broll_pipeline.selection_placements(context, selection)
+        snapshot = pipeline.read_json(root / "timeline.json")
+        variant_path = root / "a-roll-variant.json"
+        if variant_path.is_file():
+            placements = broll_pipeline.remap_placements_to_variant(
+                placements,
+                pipeline.read_json(variant_path),
+                snapshot,
+            )
+    except (broll_pipeline.BrollPipelineError, broll_ideation.BrollIdeationError) as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    selection_path = root / "broll" / "selection.json"
+    jobs_path = root / "broll" / "image-jobs.json"
+    jobs_jsonl_path = root / "broll" / "image-jobs.jsonl"
+    placements_path = root / "broll" / "placements.json"
+    pipeline.write_json(selection_path, selection)
+    pipeline.write_json(jobs_path, image_jobs)
+    pipeline.write_text(jobs_jsonl_path, broll_ideation.image_jobs_jsonl(image_jobs["jobs"]))
+    pipeline.write_json(placements_path, {"placements": placements})
+
+    source_placements = []
+    for candidate in selection.get("selected") or []:
+        if candidate.get("visual_type") != "source_cutaway":
+            continue
+        placement = next(row for row in placements if row["id"] == candidate["candidate_id"])
+        source_placements.append({
+            "id": placement["id"],
+            "visual_type": "source_cutaway",
+            "source_event_id": candidate.get("source_event_id"),
+            "start_seconds": placement["start_seconds"],
+            "source_offset_seconds": 0,
+            "duration_seconds": placement["duration_sec"],
+        })
+    source_events_path = Path((context.get("artifact_paths") or {}).get("source_events") or "")
+    if source_placements and source_events_path.is_file():
+        source_events = pipeline.read_json(source_events_path)
+        source_selection = {
+            "schema_version": source_cutaways.SOURCE_CUTAWAY_SELECTION_VERSION,
+            "source_events_sha256": source_cutaways.canonical_sha256(source_events),
+            "placements": source_placements,
+        }
+        pipeline.write_json(root / "broll" / "source-cutaway-selection.json", source_selection)
+    return {
+        "success": True,
+        "seed": str(selection_seed),
+        "selection": str(selection_path),
+        "placements": str(placements_path),
+        "selected_count": len(selection.get("selected") or []),
+        "selected_source_cutaways": len(source_placements),
+        "image_job_count": image_jobs["job_count"],
+        "image_jobs": str(jobs_path),
+        "image_jobs_jsonl": str(jobs_jsonl_path),
+        "rejected_agent_runs": selection["validation"]["rejected_agent_runs"],
+        "source_media_modified": False,
+    }
+
+
+def _cmd_broll_source_plan(args: argparse.Namespace) -> Dict[str, Any]:
+    """Build a native V2 append request after the A-roll variant exists."""
+
+    from src.utils import source_cutaways
+
+    root = _broll_project_root(args.project_dir)
+    source_events_path = _project_artifact(root, args.source_events, "broll/source-events.json")
+    selection_path = _project_artifact(root, args.selection, "broll/source-cutaway-selection.json")
+    snapshot_path = root / "timeline.json"
+    state_path = root / "a-roll-apply.json"
+    variant_path = root / "a-roll-variant.json"
+    for path in (source_events_path, selection_path, snapshot_path, state_path, variant_path):
+        if not path.is_file():
+            raise pipeline.ProductionPipelineError(f"source-cutaway planning artifact is missing: {path}")
+    snapshot = pipeline.read_json(snapshot_path)
+    state = pipeline.read_json(state_path)
+    variant = pipeline.read_json(variant_path)
+    video_ranges = [
+        row for row in ((variant.get("params") or {}).get("ranges") or [])
+        if row.get("track_type") == "video" and int(row.get("track_index") or 0) == 1
+    ]
+    if not video_ranges:
+        raise pipeline.ProductionPipelineError("A-roll variant contains no V1 ranges")
+    target_start = int(snapshot["start_frame"])
+    target_end = max(int(row["record_frame"]) + int(row["end_frame"]) - int(row["start_frame"]) for row in video_ranges)
+    target = {
+        "schema_version": source_cutaways.AROLL_TARGET_SCHEMA_VERSION,
+        "source_timeline_id": snapshot.get("id"),
+        "source_snapshot_sha256": source_cutaways.canonical_sha256(snapshot),
+        "target_timeline_id": state.get("target_timeline_id"),
+        "start_frame": target_start,
+        "end_frame": target_end,
+        "fps": snapshot.get("fps"),
+        "recoverable": True,
+        "source_preserved": True,
+    }
+    try:
+        request = source_cutaways.build_source_cutaway_request(
+            pipeline.read_json(source_events_path),
+            pipeline.read_json(selection_path),
+            snapshot,
+            target,
+            track_index=args.video_track,
+        )
+    except source_cutaways.SourceCutawayError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    output = _project_artifact(root, args.output, "broll/source-cutaway-request.json")
+    pipeline.write_json(output, request)
+    return {**request, "artifact": str(output)}
+
+
+def _cmd_broll_source_apply(args: argparse.Namespace) -> Dict[str, Any]:
+    from src.utils import source_cutaways
+
+    root = _broll_project_root(args.project_dir)
+    request_path = _project_artifact(root, args.request, "broll/source-cutaway-request.json")
+    if not request_path.is_file():
+        raise pipeline.ProductionPipelineError(f"source-cutaway request does not exist: {request_path}")
+    request = pipeline.read_json(request_path)
+    if not args.apply:
+        return request
+    if not args.approve_visuals:
+        raise pipeline.ProductionPipelineError("--approve-visuals is required after reviewing every source cutaway")
+    if not str(args.reviewer or "").strip():
+        raise pipeline.ProductionPipelineError("--reviewer is required when applying source cutaways")
+    if request.get("schema_version") != "dvr.source-cutaway-append-request.v1" or request.get("dry_run") is not True:
+        raise pipeline.ProductionPipelineError("unsupported or already-mutated source-cutaway request")
+    provenance = request.get("provenance") or {}
+    current_snapshot = pipeline.read_json(root / "timeline.json")
+    current_events = pipeline.read_json(root / "broll" / "source-events.json")
+    current_selection = pipeline.read_json(root / "broll" / "source-cutaway-selection.json")
+    if provenance.get("source_snapshot_sha256") != source_cutaways.canonical_sha256(current_snapshot):
+        raise pipeline.ProductionPipelineError("source-cutaway request is stale for timeline.json")
+    if provenance.get("source_events_sha256") != source_cutaways.canonical_sha256(current_events):
+        raise pipeline.ProductionPipelineError("source-cutaway request is stale for reviewed source events")
+    if provenance.get("selection_sha256") != source_cutaways.canonical_sha256(current_selection):
+        raise pipeline.ProductionPipelineError("source-cutaway request is stale for the selected placements")
+    from src import server
+
+    current = server.timeline("get_current", {})
+    target_id = request.get("target_timeline_id")
+    if current.get("id") != target_id:
+        raise pipeline.ProductionPipelineError("the current Resolve timeline is not the recoverable A-roll target")
+    destination = int(request.get("destination_video_track") or 2)
+    track_count = server.timeline("get_track_count", {"track_type": "video"})
+    count = int(track_count.get("count") or 0)
+    while count < destination:
+        added = server.timeline("add_track", {"track_type": "video"})
+        if added.get("error") or added.get("success") is False:
+            raise pipeline.ProductionPipelineError(f"could not create destination video track V{count + 1}: {added}")
+        count += 1
+    dispatch = request.get("dispatch") or {}
+    appended = server.media_pool(str(dispatch.get("action") or ""), dict(dispatch.get("params") or {}))
+    expected = int(request.get("placement_count") or 0)
+    if (
+        appended.get("error")
+        or appended.get("success") is False
+        or int(appended.get("count") or 0) != expected
+    ):
+        raise pipeline.ProductionPipelineError(f"native source-cutaway placement failed: {appended}")
+    applied = {
+        **request,
+        "dry_run": False,
+        "apply_authorized": True,
+        "visual_approval": {"approved": True, "reviewer": args.reviewer},
+        "result": appended,
+    }
+    output = root / "broll" / "source-cutaway-applied.json"
+    pipeline.write_json(output, applied)
+    return {**applied, "artifact": str(output)}
+
+
+def _cmd_broll_asset_record(args: argparse.Namespace) -> Dict[str, Any]:
+    from src.utils import broll_assets
+
+    root = _broll_project_root(args.project_dir)
+    jobs_path = _project_artifact(root, args.jobs, "broll/image-jobs.json")
+    jobs = pipeline.read_json(jobs_path)
+    job = next((row for row in jobs.get("jobs") or [] if row.get("job_id") == args.job_id), None)
+    if job is None:
+        raise pipeline.ProductionPipelineError(f"unknown image job: {args.job_id}")
+    try:
+        asset = broll_assets.record_generated_asset(
+            project_dir=root,
+            image_job=job,
+            asset_path=args.path,
+            provider=args.provider,
+            model=args.model,
+        )
+    except broll_assets.BrollAssetError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    output = root / "broll" / "assets" / f"{args.job_id}.json"
+    pipeline.write_json(output, asset)
+    return {"success": True, "artifact": str(output), "asset": asset}
+
+
+def _cmd_broll_asset_review(args: argparse.Namespace) -> Dict[str, Any]:
+    from src.utils import broll_assets
+
+    root = _broll_project_root(args.project_dir)
+    asset_path = Path(args.asset).expanduser().resolve()
+    placements_path = _project_artifact(root, args.placements, "broll/placements.json")
+    try:
+        reviewed = broll_assets.review_generated_asset(
+            pipeline.read_json(asset_path),
+            project_dir=root,
+            approve=args.approve,
+            reviewer=args.reviewer,
+            notes=args.notes,
+        )
+        if args.approve:
+            reviewed = broll_assets.stage_approved_asset_for_remotion(reviewed, project_dir=root)
+            payload = pipeline.read_json(placements_path)
+            payload["placements"] = broll_assets.attach_asset_to_placements(
+                list(payload.get("placements") or []), reviewed,
+            )
+            pipeline.write_json(placements_path, payload)
+    except broll_assets.BrollAssetError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    pipeline.write_json(asset_path, reviewed)
+    return {
+        "success": True,
+        "approved": bool(args.approve),
+        "asset": str(asset_path),
+        "placements": str(placements_path),
+        "review": reviewed.get("review"),
+        "remotion_src": reviewed.get("remotion_src"),
+    }
+
+
+def _cmd_broll_publish_remotion(args: argparse.Namespace) -> Dict[str, Any]:
+    """Publish reviewed synthetic/evidence B-roll as a separate Remotion manifest."""
+
+    from src.utils import broll_pipeline
+
+    root = _broll_project_root(args.project_dir)
+    base_path = _project_artifact(root, args.base_manifest, "remotion.json")
+    placements_path = _project_artifact(root, args.placements, "broll/placements.json")
+    selection_path = _project_artifact(root, args.selection, "broll/selection.json")
+    output_path = _project_artifact(root, args.output, "remotion-broll.json")
+    for path in (base_path, placements_path, selection_path):
+        if not path.is_file():
+            raise pipeline.ProductionPipelineError(f"B-roll publication artifact is missing: {path}")
+    legacy_path = (root / "remotion.json").resolve()
+    if output_path.parent != root:
+        raise pipeline.ProductionPipelineError(
+            "B-roll publication output must be a file directly under the production project"
+        )
+    if output_path in {legacy_path, base_path.resolve()}:
+        raise pipeline.ProductionPipelineError(
+            "B-roll publication output must not overwrite remotion.json or its base manifest"
+        )
+    try:
+        result = broll_pipeline.build_remotion_broll_manifest(
+            pipeline.read_json(base_path),
+            pipeline.read_json(placements_path),
+            pipeline.read_json(selection_path),
+            project_root=root,
+            allow_partial=bool(args.allow_partial),
+            artifact_provenance={
+                "selection": {
+                    "path": str(selection_path),
+                    "sha256": pipeline.file_sha256(selection_path),
+                },
+                "placements": {
+                    "path": str(placements_path),
+                    "sha256": pipeline.file_sha256(placements_path),
+                },
+                "base_manifest": {
+                    "path": str(base_path),
+                    "sha256": pipeline.file_sha256(base_path),
+                },
+            },
+        )
+    except broll_pipeline.BrollPipelineError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    pipeline.write_json(output_path, result)
+    publication = result["broll_publication"]
+    return {
+        "success": True,
+        "manifest": str(output_path),
+        "included_count": len(publication["included_ids"]),
+        "native_source_cutaway_count": len(publication["native_source_cutaway_ids"]),
+        "pending_generated_count": len(publication["pending_generated_ids"]),
+        "skipped_count": len(publication["skipped_ids"]),
+        "allow_partial": publication["allow_partial"],
+        "source_media_modified": False,
+    }
 
 
 def _production_doctor() -> Dict[str, Any]:
@@ -976,6 +1568,195 @@ def _parser() -> argparse.ArgumentParser:
     research.add_argument("--input", help="validate and adopt an existing research JSON artifact")
     research.set_defaults(handler=_cmd_research)
 
+    music = sub.add_parser(
+        "music",
+        help="discover and shortlist open-license music without downloading or importing it",
+    )
+    music_sub = music.add_subparsers(dest="music_action", required=True)
+
+    music_search = music_sub.add_parser(
+        "search",
+        help="search Openverse by editorial facets and write a review-required option manifest",
+    )
+    music_search.add_argument("--project-dir", required=True)
+    music_search.add_argument("--category", action="append", help="repeat or use commas: car promo, product demo, travel")
+    music_search.add_argument("--mood", action="append", help="repeat or use commas: elegant, confident, warm")
+    music_search.add_argument("--genre", action="append", help="repeat or use commas: cinematic, electronic, ambient")
+    music_search.add_argument("--instrument", action="append", help="repeat or use commas: synth, piano, percussion")
+    music_search.add_argument("--keyword", action="append", help="repeat or use commas for additional search concepts")
+    music_search.add_argument("--energy", help="editorial energy description, for example low, medium, or high")
+    music_search.add_argument("--with-vocals", action="store_true", help="do not add the instrumental-only search preference")
+    music_search.add_argument(
+        "--license-profile",
+        choices=("commercial-safe", "public-domain", "commercial-with-sharealike", "all-open"),
+        default="commercial-safe",
+        help="reported-license filter; commercial-safe is CC0, PDM, and CC BY",
+    )
+    music_search.add_argument("--license", action="append", help="explicit Openverse license code(s), overriding the profile")
+    music_search.add_argument("--min-duration", type=float)
+    music_search.add_argument("--max-duration", type=float)
+    music_search.add_argument(
+        "--target-duration",
+        type=float,
+        help="ranking target in seconds; defaults to the production timeline duration when available",
+    )
+    music_search.add_argument("--limit", type=int, default=12)
+    music_search.add_argument("--per-query", type=int, default=20, help="1-20; Openverse anonymous API limit")
+    music_search.add_argument("--seed", help="repeatable tie-breaking seed; random when omitted")
+    music_search.add_argument("--timeout", type=float, default=20.0)
+    music_search.add_argument("--output", help="defaults to PROJECT/music-options.json")
+    music_search.set_defaults(handler=_cmd_music_search)
+
+    music_select = music_sub.add_parser(
+        "select",
+        help="shortlist one option; selection never downloads or imports audio",
+    )
+    music_select.add_argument("--project-dir", required=True)
+    music_select.add_argument("--track-id", required=True)
+    music_select.add_argument("--options", help="defaults to PROJECT/music-options.json")
+    music_select.add_argument("--output", help="defaults to PROJECT/music-selection.json")
+    music_select.add_argument(
+        "--confirm-source-license",
+        action="store_true",
+        help="record a manual source-page check; requires reviewer, exact source page, and license code",
+    )
+    music_select.add_argument("--reviewer")
+    music_select.add_argument("--verified-source-page")
+    music_select.add_argument("--verified-license")
+    music_select.add_argument("--notes")
+    music_select.set_defaults(handler=_cmd_music_select)
+
+    broll = sub.add_parser(
+        "broll",
+        help="source-first multi-agent B-roll ideation, image jobs, and native V2 cutaways",
+    )
+    broll_sub = broll.add_subparsers(dest="broll_action", required=True)
+
+    broll_context = broll_sub.add_parser(
+        "context",
+        help="bind A1 speech, A2 visual locators, research, chunks, and reviewed V1 events",
+    )
+    broll_context.add_argument("--project-dir", required=True)
+    broll_context.add_argument("--a1")
+    broll_context.add_argument("--a2")
+    broll_context.add_argument("--research")
+    broll_context.add_argument("--chunks")
+    broll_context.add_argument("--source-events")
+    broll_context.add_argument("--output")
+    broll_context.add_argument("--guide-lookback", type=float, default=1.5)
+    broll_context.add_argument("--guide-lookahead", type=float, default=1.5)
+    broll_context.add_argument("--candidates-per-agent", type=int, default=5)
+    broll_context.add_argument("--volatile-max-age-hours", type=float, default=48.0)
+    broll_context.add_argument("--allow-stale-research", action="store_true")
+    broll_context.set_defaults(handler=_cmd_broll_context)
+
+    broll_ideate = broll_sub.add_parser(
+        "ideate",
+        help="print or run bounded independent Codex ideators; random seed by default",
+    )
+    broll_ideate.add_argument("--project-dir", required=True)
+    broll_ideate.add_argument("--context")
+    broll_ideate.add_argument("--agents", type=int, default=6)
+    broll_ideate.add_argument("--candidates-per-agent", type=int, default=5)
+    broll_ideate.add_argument("--minimum-successes", type=int, default=2)
+    broll_ideate.add_argument("--max-workers", type=int, default=3)
+    broll_ideate.add_argument("--timeout", type=float, default=900)
+    broll_ideate.add_argument("--seed", type=int)
+    broll_ideate.add_argument("--search", action="store_true", help="allow agents to refresh web context; research remains the evidence ledger")
+    broll_ideate.add_argument(
+        "--generated-only",
+        action="store_true",
+        help="second-pass ideation only for concepts that reviewed source footage cannot literally show",
+    )
+    broll_ideate.add_argument(
+        "--visual-types",
+        action="append",
+        help="restrict candidate visual types; repeat or pass comma-separated schema values",
+    )
+    broll_ideate.add_argument("--run", action="store_true")
+    broll_ideate.set_defaults(handler=_cmd_broll_ideate)
+
+    broll_select = broll_sub.add_parser(
+        "select",
+        help="validate agent output and make a seeded diverse source-first selection",
+    )
+    broll_select.add_argument("--project-dir", required=True)
+    broll_select.add_argument("--context")
+    agent_source = broll_select.add_mutually_exclusive_group(required=True)
+    agent_source.add_argument("--agent-run")
+    agent_source.add_argument("--source-only", action="store_true")
+    broll_select.add_argument("--max-candidates", type=int, default=10)
+    broll_select.add_argument("--quality-floor", type=float, default=0.5)
+    broll_select.add_argument("--diversity", type=float, default=0.45)
+    broll_select.add_argument("--seed")
+    broll_select.add_argument("--image-variations", type=int, default=2)
+    broll_select.add_argument("--image-seed")
+    broll_select.set_defaults(handler=_cmd_broll_select)
+
+    broll_source_plan = broll_sub.add_parser(
+        "source-plan",
+        help="build a dry-run native V2 append request for reviewed project footage",
+    )
+    broll_source_plan.add_argument("--project-dir", required=True)
+    broll_source_plan.add_argument("--source-events")
+    broll_source_plan.add_argument("--selection")
+    broll_source_plan.add_argument("--video-track", type=int, default=2)
+    broll_source_plan.add_argument("--output")
+    broll_source_plan.set_defaults(handler=_cmd_broll_source_plan)
+
+    broll_source_apply = broll_sub.add_parser(
+        "source-apply",
+        help="inspect or explicitly place an approved source-cutaway request on the current A-roll variant",
+    )
+    broll_source_apply.add_argument("--project-dir", required=True)
+    broll_source_apply.add_argument("--request")
+    broll_source_apply.add_argument("--apply", action="store_true")
+    broll_source_apply.add_argument("--approve-visuals", action="store_true")
+    broll_source_apply.add_argument("--reviewer")
+    broll_source_apply.set_defaults(handler=_cmd_broll_source_apply)
+
+    broll_asset_record = broll_sub.add_parser(
+        "asset-record",
+        help="record provenance for a generated image already written under PROJECT/broll/generated",
+    )
+    broll_asset_record.add_argument("--project-dir", required=True)
+    broll_asset_record.add_argument("--jobs")
+    broll_asset_record.add_argument("--job-id", required=True)
+    broll_asset_record.add_argument("--path", required=True)
+    broll_asset_record.add_argument("--provider", required=True)
+    broll_asset_record.add_argument("--model")
+    broll_asset_record.set_defaults(handler=_cmd_broll_asset_record)
+
+    broll_asset_review = broll_sub.add_parser(
+        "asset-review",
+        help="approve/reject a generated image, then stage approved assets for Remotion",
+    )
+    broll_asset_review.add_argument("--project-dir", required=True)
+    broll_asset_review.add_argument("--asset", required=True)
+    broll_asset_review.add_argument("--placements")
+    decision = broll_asset_review.add_mutually_exclusive_group(required=True)
+    decision.add_argument("--approve", action="store_true")
+    decision.add_argument("--reject", action="store_true")
+    broll_asset_review.add_argument("--reviewer", required=True)
+    broll_asset_review.add_argument("--notes")
+    broll_asset_review.set_defaults(handler=_cmd_broll_asset_review)
+
+    broll_publish = broll_sub.add_parser(
+        "publish-remotion",
+        help="publish reviewed non-source placements to a separate renderer manifest",
+    )
+    broll_publish.add_argument("--project-dir", required=True)
+    broll_publish.add_argument("--placements", help="defaults to PROJECT/broll/placements.json")
+    broll_publish.add_argument("--selection", help="defaults to PROJECT/broll/selection.json")
+    broll_publish.add_argument("--base-manifest", help="defaults to PROJECT/remotion.json")
+    broll_publish.add_argument("--output", help="defaults to PROJECT/remotion-broll.json")
+    broll_publish.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="skip pending generated assets; never bypass approval or integrity checks",
+    )
+    broll_publish.set_defaults(handler=_cmd_broll_publish_remotion)
+
     plan = sub.add_parser("plan", help="match research beats to transcript chunks and make render/edit manifests")
     plan.add_argument("--project-dir", required=True)
     plan.add_argument("--edit-transcript", help="timed transcript used for chunks/cuts (defaults to guide-track output)")
@@ -995,6 +1776,10 @@ def _parser() -> argparse.ArgumentParser:
     remotion = sub.add_parser("remotion", help="open Studio or render planned B-roll segments")
     remotion.add_argument("action", choices=("studio", "render", "captions"))
     remotion.add_argument("--project-dir", required=True)
+    remotion.add_argument(
+        "--manifest",
+        help="manifest path, relative to project dir by default (default: remotion.json)",
+    )
     remotion.add_argument("--print-command", action="store_true")
     remotion.set_defaults(handler=_cmd_remotion)
 

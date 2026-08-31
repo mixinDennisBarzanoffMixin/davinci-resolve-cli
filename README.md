@@ -135,8 +135,22 @@ dvr production words \
   --format remotion-json --output words.remotion.json
 
 dvr production research --project-dir "$HOME/Documents/car-videos/kia-k8" --run
+dvr production music search \
+  --project-dir "$HOME/Documents/car-videos/kia-k8" \
+  --category "car promo" --mood "elegant,confident" \
+  --genre "cinematic,electronic" --energy medium \
+  --min-duration 90 --max-duration 360
 dvr production plan --project-dir "$HOME/Documents/car-videos/kia-k8"
-dvr production remotion studio --project-dir "$HOME/Documents/car-videos/kia-k8"
+# After a source-safe frame review writes broll/source-events.json:
+dvr production broll context --project-dir "$HOME/Documents/car-videos/kia-k8"
+dvr production broll ideate --project-dir "$HOME/Documents/car-videos/kia-k8" \
+  --agents 6 --run
+dvr production broll select --project-dir "$HOME/Documents/car-videos/kia-k8" \
+  --agent-run /path/to/agent-run.json --seed edit-v1 --image-seed images-v1
+dvr production broll publish-remotion \
+  --project-dir "$HOME/Documents/car-videos/kia-k8"
+dvr production remotion studio --project-dir "$HOME/Documents/car-videos/kia-k8" \
+  --manifest remotion-broll.json
 ```
 
 `--words-only` writes `words.jsonl`, `words.tsv`, `words.txt`, and
@@ -153,6 +167,18 @@ layers.
 Research uses live Codex web search plus strict schema/evidence validation; a
 failed or empty research run cannot silently produce B-roll. Rights-approved
 local photos/video can be staged per beat with `production attach-asset`.
+Independent B-roll ideators are schema-bound and seed-recorded; source events
+must be frame-reviewed, generated images must be non-exact and visually
+approved, and multiple visuals in one narration chunk are scheduled without
+overlap. Native source cutaways and rendered illustrative graphics remain
+separate until their explicit Resolve apply gates.
+`production music search` queries Openverse using category, mood, genre,
+instrument, keyword, energy, duration, vocal, and license facets and writes a
+ranked `music-options.json`. The commercial-oriented default only requests
+reported CC0, public-domain-mark, or CC BY results. Openverse does not verify
+upstream licensing, so every option remains blocked on source-page license and
+attribution review. `music select` records a shortlist; neither command
+downloads audio or imports it into Resolve.
 
 See the [Production Pipeline Guide](docs/guides/production-pipeline.md).
 

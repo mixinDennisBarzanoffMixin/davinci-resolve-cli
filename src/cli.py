@@ -868,7 +868,14 @@ def completion_candidates(words: List[str]) -> List[str]:
             if len(complete) == 1:
                 candidates = [
                     "doctor", "setup", "inspect", "init", "extract-track", "transcribe", "words", "correct", "chunk",
-                    "research", "plan", "apply-a-roll", "attach-asset", "remotion", "import-broll",
+                    "research", "music", "broll", "plan", "apply-a-roll", "attach-asset", "remotion", "import-broll",
+                ]
+            elif len(complete) == 2 and complete[1] == "music":
+                candidates = ["search", "select"]
+            elif len(complete) == 2 and complete[1] == "broll":
+                candidates = [
+                    "context", "ideate", "select", "source-plan", "source-apply",
+                    "asset-record", "asset-review", "publish-remotion",
                 ]
             else:
                 candidates = list(_COMMON_PARAMETER_FLAGS)

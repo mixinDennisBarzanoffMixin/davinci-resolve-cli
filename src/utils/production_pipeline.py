@@ -363,7 +363,14 @@ def execute_audio_extract(plan: Mapping[str, Any], *, overwrite: bool = False) -
     output.parent.mkdir(parents=True, exist_ok=True)
     argv = list(plan["argv"])
     argv.insert(-1, "-y" if overwrite else "-n")
-    completed = subprocess.run(argv, text=True, capture_output=True, check=False)
+    completed = subprocess.run(
+        argv,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
     if completed.returncode != 0:
         raise ProductionPipelineError(completed.stderr.strip() or "ffmpeg audio extraction failed")
     return {**dict(plan), "success": True, "bytes": output.stat().st_size}

@@ -32,10 +32,19 @@ export const Root: React.FC = () => (
             beat_id: 'feature',
             start_seconds: 0,
             duration_seconds: 3,
-            on_screen_text: 'Kia K8 · 23 014 €',
+            on_screen_text: 'Product overview',
             visual_brief: 'Evidence-backed feature card',
             evidence_urls: [],
             must_not_show: [],
+            status: 'ready-for-motion-graphic',
+            treatment: {
+              kind: 'motion_graphic',
+              motion: {seed: 42, variant: 'auto'},
+              graphic: {
+                primary_text: 'Product detail',
+                secondary_text: 'Evidence-backed motion graphic',
+              },
+            },
             asset: null,
           },
         }}
@@ -60,6 +69,7 @@ export const Root: React.FC = () => (
           timelineDurationSeconds: 10,
           captions: [],
           placements: [],
+          music: null,
         }}
       />
       <Composition
@@ -82,6 +92,7 @@ export const Root: React.FC = () => (
           timelineDurationSeconds: 10,
           captions: [],
           placements: [],
+          music: null,
         }}
       />
     </Folder>

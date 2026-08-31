@@ -57,7 +57,7 @@ Usage:
   davinci-resolve-mcp server [server.py options]
   davinci-resolve-mcp control-panel [control panel options]
   davinci-resolve-mcp batch <plan|run|status|list|resume|cancel> [options]
-  davinci-resolve-mcp production <doctor|setup|inspect|init|extract-track|transcribe|words|correct|chunk|research|plan|apply-a-roll|attach-asset|remotion|import-broll> [options]
+  davinci-resolve-mcp production <doctor|setup|inspect|init|extract-track|transcribe|words|correct|chunk|research|music|broll|plan|apply-a-roll|attach-asset|remotion|import-broll> [options]
   davinci-resolve-mcp cli <tool|command> [arguments]
   davinci-resolve-mcp advanced <tool> <action> [arguments]
   davinci-resolve-mcp --version

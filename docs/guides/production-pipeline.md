@@ -129,6 +129,47 @@ from model/category context, preserves conflicting claims, and forbids inferring
 options from trim-level availability. A B-roll beat is rejected unless it has a
 fact ID, an evidence URL, and a resolved `must_not_show` list.
 
+## Discover a music bed without pulling media
+
+```bash
+dvr production music search --project-dir /path/to/run \
+  --category "car promo,product showcase" \
+  --mood "elegant,confident,modern" \
+  --genre "cinematic,electronic,ambient" \
+  --instrument "synth,percussion,piano" \
+  --keyword "luxury,technology" --energy medium \
+  --min-duration 90 --max-duration 360 --limit 12
+
+# Shortlist only; this remains blocked on license review.
+dvr production music select --project-dir /path/to/run --track-id OPENVERSE_ID
+```
+
+`music search` uses the [Openverse API](https://api.openverse.org/v1/) and
+writes `music-options.json` with the exact title, creator, source page, media
+URL, reported license URL, attribution string, provider/source identifiers,
+query provenance, and repeatable ranking seed. Facets may be repeated or
+comma-separated. If `--target-duration` is omitted, the timeline duration is a
+ranking hint; duration never causes an edit or download.
+
+The default `commercial-safe` filter means only *reported* CC0, Public Domain
+Mark, or CC BY metadata is requested. It is a discovery filter, not legal
+clearance: [Openverse's terms](https://docs.openverse.org/terms_of_service.html)
+say its aggregated license status is not verified. Listen for vocals and fit,
+open the upstream `source_page`, and confirm the current creator, license,
+attribution, and commercial use before obtaining a file. To record that manual
+check, repeat the exact values deliberately:
+
+```bash
+dvr production music select --project-dir /path/to/run --track-id OPENVERSE_ID \
+  --confirm-source-license --reviewer editor-name \
+  --verified-source-page 'https://upstream.example/exact-track-page' \
+  --verified-license by --notes 'Creator and CC BY terms checked on source page'
+```
+
+This still does not download, copy, transcode, or import audio. File acquisition
+and Resolve attachment remain separate explicit operations so the source and
+rights review cannot be bypassed by search.
+
 ## Plan cuts and B-roll
 
 ```bash
@@ -156,7 +197,81 @@ dvr production apply-a-roll --request /path/to/run/a-roll-variant.json
 dvr production apply-a-roll --request /path/to/run/a-roll-variant.json --apply
 ```
 
+## Evidence-gated B-roll agents
+
+The B-roll branch keeps three inputs separate: A1 recorded speech establishes
+what the presenter said, current research establishes exact-item facts, and A2
+is only a visual locator. A frame-reviewed `broll/source-events.json` binds real
+V1 ranges to exact Media Pool item IDs and reviewed frame hashes. That lets the
+selector prefer the actual door, cabin, exterior, and price-card footage instead
+of synthesizing replacements.
+
+```bash
+# Build the immutable agent context and strict structured-output schema.
+dvr production broll context --project-dir /path/to/run
+
+# Inspect the bounded jobs first, then launch independent seeded Codex workers.
+dvr production broll ideate --project-dir /path/to/run --agents 6
+dvr production broll ideate --project-dir /path/to/run --agents 6 --run
+
+# Optional second pass: concepts that reviewed source footage cannot show.
+dvr production broll ideate --project-dir /path/to/run --agents 3 \
+  --generated-only --visual-types generated_image --run
+
+# Validate every candidate, deduplicate agent consensus, and schedule placements.
+dvr production broll select --project-dir /path/to/run \
+  --agent-run /path/to/run/broll/agent-runs/AGENT_RUN/run.json \
+  --seed editorial-v1 --image-seed images-v1
+```
+
+Generated-image jobs are JSON/JSONL contracts. An image host writes each output
+under `broll/generated/`; the CLI then records the exact prompt and file hash,
+requires visual review, and stages only an approved non-exact illustration:
+
+```bash
+dvr production broll asset-record --project-dir /path/to/run \
+  --job-id IMAGE_JOB_ID --path /path/to/run/broll/generated/example.png \
+  --provider image-provider --model model-name
+dvr production broll asset-review --project-dir /path/to/run \
+  --asset /path/to/run/broll/assets/IMAGE_JOB_ID.json \
+  --approve --reviewer editor-name
+```
+
+Multiple selections in one narration chunk are scheduled sequentially, not
+stacked at the same frame, and their offsets survive A-roll compaction. Once the
+recoverable A-roll variant has actually been created, source cutaways have a
+separate native Resolve dry-run/apply gate:
+
+```bash
+dvr production broll source-plan --project-dir /path/to/run --video-track 2
+dvr production broll source-apply --project-dir /path/to/run
+dvr production broll source-apply --project-dir /path/to/run --apply \
+  --approve-visuals --reviewer editor-name
+```
+
+No B-roll command blades or replaces the source timeline. Ideation and
+selection are sidecar-only; generated media is always disclosed as illustrative;
+Resolve writes require the explicit apply and visual-approval flags.
+
 ## Remotion B-roll and animated Bulgarian captions
+
+Publish the reviewed B-roll selection before opening Studio or rendering:
+
+```bash
+dvr production broll publish-remotion --project-dir /path/to/run
+dvr production remotion studio --project-dir /path/to/run \
+  --manifest remotion-broll.json
+dvr production remotion render --project-dir /path/to/run \
+  --manifest remotion-broll.json
+```
+
+Publication writes `remotion-broll.json`; it never overwrites the legacy
+`remotion.json`. It preserves that manifest's captions and records hashes for
+the selection, placements, and base manifest. Ready motion graphics, diagrams,
+and approved local generated/evidence images are included. Reviewed project
+footage is excluded because source cutaways are placed natively in Resolve.
+Pending generated assets fail publication; use `--allow-partial` only to omit
+those pending placements, never to bypass visual, rights, path, or hash checks.
 
 ```bash
 dvr production remotion studio --project-dir /path/to/run

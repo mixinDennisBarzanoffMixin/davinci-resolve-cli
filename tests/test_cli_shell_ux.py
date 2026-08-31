@@ -100,6 +100,21 @@ class DynamicCompletionTests(unittest.TestCase):
 
         self.assertEqual(completion_candidates(["production", "wo"]), ["words"])
 
+    def test_production_music_subcommands_complete(self):
+        from src.cli import completion_candidates
+
+        self.assertEqual(completion_candidates(["production", "mu"]), ["music"])
+        self.assertEqual(completion_candidates(["production", "music", "s"]), ["search", "select"])
+
+    def test_production_broll_subcommands_complete(self):
+        from src.cli import completion_candidates
+
+        self.assertEqual(completion_candidates(["production", "br"]), ["broll"])
+        self.assertEqual(
+            completion_candidates(["production", "broll", "source-"]),
+            ["source-apply", "source-plan"],
+        )
+
     def test_hidden_completion_endpoint_preserves_option_words(self):
         from contextlib import redirect_stdout
 
