@@ -739,9 +739,19 @@ def _cmd_import_broll(args: argparse.Namespace) -> Dict[str, Any]:
     root = Path(args.project_dir).resolve()
     snapshot = pipeline.read_json(root / "timeline.json")
     render_report = pipeline.read_json(root / "broll-renders" / "render-manifest.json")
-    manifest_path = root / "remotion.json"
+    manifest_value = getattr(args, "manifest", None)
+    manifest_path = Path(str(manifest_value or "remotion.json")).expanduser()
+    manifest_path = (
+        manifest_path.resolve()
+        if manifest_path.is_absolute()
+        else (root / manifest_path).resolve()
+    )
+    if not manifest_path.is_file():
+        raise pipeline.ProductionPipelineError(f"Remotion manifest does not exist: {manifest_path}")
     if render_report.get("manifestSha256") != pipeline.file_sha256(manifest_path):
-        raise pipeline.ProductionPipelineError("render manifest is stale; rerender after the latest plan")
+        raise pipeline.ProductionPipelineError(
+            "render manifest is stale or belongs to a different Remotion manifest; rerender that manifest"
+        )
     rendered = list(render_report.get("rendered") or [])
     if not rendered:
         raise pipeline.ProductionPipelineError("render manifest contains no B-roll clips")
@@ -770,6 +780,7 @@ def _cmd_import_broll(args: argparse.Namespace) -> Dict[str, Any]:
         "source_timeline_id": snapshot.get("id"),
         "target_timeline_id": target_timeline_id,
         "target_status": "applied_variant" if target_timeline_id else "pending_a_roll_variant",
+        "manifest": str(manifest_path),
         "video_track": args.video_track,
         "would_import": paths,
         "placements": placements,
@@ -1794,6 +1805,10 @@ def _parser() -> argparse.ArgumentParser:
 
     import_broll = sub.add_parser("import-broll", help="plan or place rendered segments on a Resolve video track")
     import_broll.add_argument("--project-dir", required=True)
+    import_broll.add_argument(
+        "--manifest",
+        help="manifest used for the render, relative to project dir by default (default: remotion.json)",
+    )
     import_broll.add_argument("--video-track", type=int, default=2)
     import_broll.add_argument("--apply", action="store_true")
     import_broll.add_argument("--approve-visuals", action="store_true", help="confirm every rendered clip passed visual and factual review")

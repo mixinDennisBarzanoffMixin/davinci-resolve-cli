@@ -384,18 +384,20 @@ class ProductionCliContractTest(unittest.TestCase):
             pipeline.write_json(root / "timeline.json", {
                 "id": "source", "fps": 60, "start_frame": 216000,
             })
-            pipeline.write_json(root / "remotion.json", {"placements": []})
+            pipeline.write_json(root / "remotion-broll.json", {"placements": []})
             pipeline.write_json(render_dir / "render-manifest.json", {
-                "manifestSha256": pipeline.file_sha256(root / "remotion.json"),
+                "manifestSha256": pipeline.file_sha256(root / "remotion-broll.json"),
                 "rendered": [{
                     "output": str(clip), "beat_id": "engine", "start_seconds": 1,
                     "duration_seconds": 3, "durationInFrames": 180,
                 }],
             })
             result = production_cli._cmd_import_broll(SimpleNamespace(
-                project_dir=str(root), video_track=2, apply=False, approve_visuals=False,
+                project_dir=str(root), manifest="remotion-broll.json", video_track=2,
+                apply=False, approve_visuals=False,
             ))
             placement = result["placements"][0]
+            self.assertEqual(result["manifest"], str((root / "remotion-broll.json").resolve()))
             self.assertEqual(placement["record_frame"], 216060)
             self.assertEqual(placement["record_frame_mode"], "absolute")
 

@@ -285,11 +285,12 @@ dvr production remotion render --project-dir /path/to/run
 dvr production remotion captions --project-dir /path/to/run
 
 # Review exact Resolve record-frame placements without changing the timeline.
-dvr production import-broll --project-dir /path/to/run --video-track 2
+dvr production import-broll --project-dir /path/to/run --video-track 2 \
+  --manifest remotion-broll.json
 
 # Explicitly import and place the rendered clips on V2.
 dvr production import-broll --project-dir /path/to/run --video-track 2 \
-  --apply --approve-visuals
+  --manifest remotion-broll.json --apply --approve-visuals
 ```
 
 The Remotion workspace includes:
