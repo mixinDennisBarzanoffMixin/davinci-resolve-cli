@@ -388,6 +388,52 @@ class ProductionCliContractTest(unittest.TestCase):
         self.assertTrue(args.generated_only)
         self.assertEqual(args.visual_types, ["generated_image,diagram", "motion_graphic"])
 
+    def test_remotion_and_import_accept_isolated_pack_paths(self):
+        render = production_cli._parser().parse_args([
+            "remotion", "render", "--project-dir", "/tmp/project",
+            "--output-dir", "vertical-pack", "--sync-live-format",
+        ])
+        self.assertEqual(render.output_dir, "vertical-pack")
+        self.assertTrue(render.sync_live_format)
+        imported = production_cli._parser().parse_args([
+            "import-broll", "--project-dir", "/tmp/project",
+            "--render-manifest", "vertical-pack/render-manifest.json",
+        ])
+        self.assertEqual(imported.render_manifest, "vertical-pack/render-manifest.json")
+
+    def test_remotion_render_rejects_silent_live_format_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pipeline.write_json(root / "remotion.json", {
+                "fps": 60, "width": 1920, "height": 1080, "placements": [],
+            })
+            args = SimpleNamespace(
+                action="render", project_dir=str(root), manifest=None,
+                print_command=True, output_dir="vertical-pack", sync_live_format=False,
+            )
+            with patch.object(production_cli, "_live_target_video_format", return_value={
+                "timeline_id": "target", "fps": 60.0, "width": 1080, "height": 1920,
+            }):
+                with self.assertRaises(pipeline.ProductionPipelineError):
+                    production_cli._cmd_remotion(args)
+
+    def test_remotion_render_can_derive_live_vertical_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pipeline.write_json(root / "remotion.json", {
+                "fps": 30, "width": 1920, "height": 1080, "placements": [],
+            })
+            args = SimpleNamespace(
+                action="render", project_dir=str(root), manifest=None,
+                print_command=True, output_dir="vertical-pack", sync_live_format=True,
+            )
+            with patch.object(production_cli, "_live_target_video_format", return_value={
+                "timeline_id": "target", "fps": 60.0, "width": 1080, "height": 1920,
+            }):
+                result = production_cli._cmd_remotion(args)
+            derived = pipeline.read_json(result["effective_manifest"])
+            self.assertEqual((derived["width"], derived["height"], derived["fps"]), (1080, 1920, 60.0))
+
     def test_research_command_enables_codex_web_search(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

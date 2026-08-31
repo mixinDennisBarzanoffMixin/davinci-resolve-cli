@@ -151,7 +151,13 @@ dvr production broll publish-remotion \
   --project-dir "$HOME/Documents/car-videos/kia-k8"
 dvr production remotion studio --project-dir "$HOME/Documents/car-videos/kia-k8" \
   --manifest remotion-broll.json
+dvr production remotion render --project-dir "$HOME/Documents/car-videos/kia-k8" \
+  --manifest remotion-broll.json --sync-live-format \
+  --output-dir broll-renders/edit-v1
 ```
+
+Rendering checks the open target timeline's FPS and dimensions; use
+`--sync-live-format` after switching between landscape and vertical edits.
 
 `--words-only` writes `words.jsonl`, `words.tsv`, `words.txt`, and
 `words.remotion.json` without creating SRT, VTT, or caption-block files. The

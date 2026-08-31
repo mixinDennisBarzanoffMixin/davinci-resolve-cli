@@ -2,12 +2,14 @@ import React from 'react';
 import {Composition, Folder} from 'remotion';
 import {BrollSegment} from './BrollSegment';
 import {CaptionOverlay} from './CaptionOverlay';
+import {ProductionCardCompositions} from './ProductionCards';
 import {ProductionPreview} from './ProductionPreview';
 import type {ProductionProps, SegmentProps} from './types';
 
 export const Root: React.FC = () => (
   <>
     <Folder name="Production-pipeline">
+      <ProductionCardCompositions />
       <Composition
         id="BrollSegment"
         component={BrollSegment}

@@ -21,6 +21,22 @@ export type GraphicTreatment = {
   primary_text?: string;
   secondary_text?: string;
   motif?: 'rings' | 'grid' | 'pulse';
+  card?: {
+    kind:
+      | 'powertrain'
+      | 'door-access'
+      | 'cabin'
+      | 'service-parts'
+      | 'warranty'
+      | 'price-reduction'
+      | 'inventory'
+      | 'cta';
+    eyebrow: string;
+    title: string;
+    subtitle: string;
+    facts: Array<{label: string; value: string}>;
+    footer?: string;
+  };
 };
 
 type TreatmentMetadata = {

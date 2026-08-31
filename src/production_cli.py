@@ -827,6 +827,36 @@ def _cmd_apply_aroll(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+def _live_target_video_format(root: Path) -> Optional[Dict[str, Any]]:
+    """Return the open recoverable target's video format when Resolve is reachable."""
+
+    state_path = root / "a-roll-apply.json"
+    if not state_path.is_file():
+        return None
+    state = pipeline.read_json(state_path)
+    target_id = str(state.get("target_timeline_id") or "")
+    if not target_id:
+        return None
+    try:
+        from src import server
+
+        current = server.timeline("get_current", {})
+        if current.get("error") or str(current.get("id") or "") != target_id:
+            return None
+        result = server.timeline("get_setting", {})
+        values = result.get("settings") or {}
+        return {
+            "timeline_id": target_id,
+            "fps": float(values.get("timelineFrameRate") or values.get("timelinePlaybackFrameRate")),
+            "width": int(values.get("timelineResolutionWidth")),
+            "height": int(values.get("timelineResolutionHeight")),
+        }
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        # Offline rendering remains supported. A reachable matching target is
+        # required only when --sync-live-format is explicitly requested.
+        return None
+
+
 def _cmd_remotion(args: argparse.Namespace) -> Dict[str, Any]:
     root = Path(args.project_dir).resolve()
     manifest_value = getattr(args, "manifest", None)
@@ -837,19 +867,57 @@ def _cmd_remotion(args: argparse.Namespace) -> Dict[str, Any]:
     remotion_root = Path(
         os.environ.get("DVR_REMOTION_ROOT") or Path(__file__).resolve().parents[1] / "remotion"
     ).resolve()
+    effective_manifest = manifest
+    live_format = None
+    output_value = getattr(args, "output_dir", None) or "broll-renders"
+    output = Path(str(output_value)).expanduser()
+    output = output.resolve() if output.is_absolute() else (root / output).resolve()
+    if args.action == "render" and manifest.is_file():
+        declared = pipeline.read_json(manifest)
+        live_format = _live_target_video_format(root)
+        declared_format = {
+            "fps": float(declared.get("fps") or 0),
+            "width": int(declared.get("width") or 0),
+            "height": int(declared.get("height") or 0),
+        }
+        mismatch = live_format is not None and any(
+            declared_format[key] != live_format[key] for key in ("fps", "width", "height")
+        )
+        if mismatch and not getattr(args, "sync_live_format", False):
+            raise pipeline.ProductionPipelineError(
+                "Remotion manifest format "
+                f"{declared_format['width']}x{declared_format['height']}@{declared_format['fps']:g} "
+                "does not match the open target timeline "
+                f"{live_format['width']}x{live_format['height']}@{live_format['fps']:g}; "
+                "rerun with --sync-live-format to render a derived, source-safe manifest"
+            )
+        if getattr(args, "sync_live_format", False):
+            if live_format is None:
+                raise pipeline.ProductionPipelineError(
+                    "--sync-live-format requires Resolve with this production's recoverable target timeline open"
+                )
+            declared.update({key: live_format[key] for key in ("fps", "width", "height")})
+            output.mkdir(parents=True, exist_ok=True)
+            effective_manifest = output / f"{manifest.stem}-live-format.json"
+            pipeline.write_json(effective_manifest, declared)
+
     if args.action == "studio":
         command = ["npm", "--prefix", str(remotion_root), "run", "studio", "--", "--props", str(manifest)]
     elif args.action == "render":
-        output = root / "broll-renders"
         output.mkdir(parents=True, exist_ok=True)
-        command = ["npm", "--prefix", str(remotion_root), "run", "render-segments", "--", str(manifest), str(output)]
+        command = ["npm", "--prefix", str(remotion_root), "run", "render-segments", "--", str(effective_manifest), str(output)]
     else:
         command = [
             "npm", "--prefix", str(remotion_root), "run", "render-captions", "--",
             str(manifest), str(root / "captions-overlay.mov"),
         ]
     if args.print_command:
-        return {"command": command, "manifest": str(manifest)}
+        return {
+            "command": command,
+            "manifest": str(manifest),
+            "effective_manifest": str(effective_manifest),
+            "live_format": live_format,
+        }
     completed = subprocess.run(command, stdout=sys.stderr, stderr=sys.stderr, check=False)
     if completed.returncode != 0:
         raise pipeline.ProductionPipelineError(f"Remotion {args.action} failed")
@@ -858,6 +926,9 @@ def _cmd_remotion(args: argparse.Namespace) -> Dict[str, Any]:
         "action": args.action,
         "project_dir": str(root),
         "manifest": str(manifest),
+        "effective_manifest": str(effective_manifest),
+        "output_dir": str(output) if args.action == "render" else None,
+        "live_format": live_format,
     }
 
 
@@ -917,7 +988,10 @@ def _cmd_attach_asset(args: argparse.Namespace) -> Dict[str, Any]:
 def _cmd_import_broll(args: argparse.Namespace) -> Dict[str, Any]:
     root = Path(args.project_dir).resolve()
     snapshot = pipeline.read_json(root / "timeline.json")
-    render_report = pipeline.read_json(root / "broll-renders" / "render-manifest.json")
+    render_value = getattr(args, "render_manifest", None) or "broll-renders/render-manifest.json"
+    render_path = Path(str(render_value)).expanduser()
+    render_path = render_path.resolve() if render_path.is_absolute() else (root / render_path).resolve()
+    render_report = pipeline.read_json(render_path)
     manifest_value = getattr(args, "manifest", None)
     manifest_path = Path(str(manifest_value or "remotion.json")).expanduser()
     manifest_path = (
@@ -960,6 +1034,7 @@ def _cmd_import_broll(args: argparse.Namespace) -> Dict[str, Any]:
         "target_timeline_id": target_timeline_id,
         "target_status": "applied_variant" if target_timeline_id else "pending_a_roll_variant",
         "manifest": str(manifest_path),
+        "render_manifest": str(render_path),
         "video_track": args.video_track,
         "would_import": paths,
         "placements": placements,
@@ -2093,6 +2168,15 @@ def _parser() -> argparse.ArgumentParser:
         "--manifest",
         help="manifest path, relative to project dir by default (default: remotion.json)",
     )
+    remotion.add_argument(
+        "--output-dir",
+        help="render directory, relative to project dir by default (default: broll-renders)",
+    )
+    remotion.add_argument(
+        "--sync-live-format",
+        action="store_true",
+        help="derive a render manifest using the open target timeline's fps and dimensions",
+    )
     remotion.add_argument("--print-command", action="store_true")
     remotion.set_defaults(handler=_cmd_remotion)
 
@@ -2110,6 +2194,10 @@ def _parser() -> argparse.ArgumentParser:
     import_broll.add_argument(
         "--manifest",
         help="manifest used for the render, relative to project dir by default (default: remotion.json)",
+    )
+    import_broll.add_argument(
+        "--render-manifest",
+        help="render receipt path, relative to project dir (default: broll-renders/render-manifest.json)",
     )
     import_broll.add_argument("--video-track", type=int, default=2)
     import_broll.add_argument("--apply", action="store_true")

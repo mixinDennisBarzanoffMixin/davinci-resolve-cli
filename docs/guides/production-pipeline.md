@@ -262,7 +262,8 @@ dvr production broll publish-remotion --project-dir /path/to/run
 dvr production remotion studio --project-dir /path/to/run \
   --manifest remotion-broll.json
 dvr production remotion render --project-dir /path/to/run \
-  --manifest remotion-broll.json
+  --manifest remotion-broll.json --sync-live-format \
+  --output-dir broll-renders/edit-v1
 ```
 
 Publication writes `remotion-broll.json`; it never overwrites the legacy
@@ -281,17 +282,29 @@ dvr production attach-asset --project-dir /path/to/run \
   --beat-id exterior-identity --path /path/to/approved-photo.jpg \
   --exact-item --attribution "Seller gallery, permission confirmed" --approve-rights
 
-dvr production remotion render --project-dir /path/to/run
+dvr production remotion render --project-dir /path/to/run \
+  --manifest remotion-broll.json --sync-live-format \
+  --output-dir broll-renders/edit-v1
 dvr production remotion captions --project-dir /path/to/run
 
 # Review exact Resolve record-frame placements without changing the timeline.
 dvr production import-broll --project-dir /path/to/run --video-track 2 \
-  --manifest remotion-broll.json
+  --manifest broll-renders/edit-v1/remotion-broll-live-format.json \
+  --render-manifest broll-renders/edit-v1/render-manifest.json
 
 # Explicitly import and place the rendered clips on V2.
 dvr production import-broll --project-dir /path/to/run --video-track 2 \
-  --manifest remotion-broll.json --apply --approve-visuals
+  --manifest broll-renders/edit-v1/remotion-broll-live-format.json \
+  --render-manifest broll-renders/edit-v1/render-manifest.json \
+  --apply --approve-visuals
 ```
+
+When the recoverable Resolve target is open, rendering rejects a silent FPS or
+resolution mismatch. `--sync-live-format` writes a derived manifest inside the
+chosen output directory and renders from the live timeline dimensions without
+altering the authored manifest. Separate `--output-dir` and
+`--render-manifest` paths keep multiple reviewed packs immutable and directly
+addressable from Bash.
 
 The Remotion workspace includes:
 

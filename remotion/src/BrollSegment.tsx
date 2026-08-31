@@ -10,6 +10,7 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from 'remotion';
+import {ProductionCard} from './ProductionCards';
 import type {
   BrollAsset,
   BrollPlacement,
@@ -323,7 +324,7 @@ export const BrollSegment: React.FC<SegmentProps> = ({
   accentColor = '#e51d2a',
 }) => {
   const frame = useCurrentFrame();
-  const {durationInFrames, fps} = useVideoConfig();
+  const {durationInFrames, fps, width, height} = useVideoConfig();
   const asset = placement.asset;
   const source = asset?.src ? assetSource(asset.src) : null;
   const kind = inferSceneKind(placement);
@@ -334,10 +335,24 @@ export const BrollSegment: React.FC<SegmentProps> = ({
   const endFrame = Math.max(1, durationInFrames - 1);
   const fadeFrames = Math.min(12, Math.max(1, Math.floor(endFrame / 3)));
   const fadeOutStart = Math.max(fadeFrames, endFrame - fadeFrames);
+  const graphic = placement.treatment?.kind === 'motion_graphic'
+    || placement.treatment?.kind === 'diagram'
+    ? placement.treatment.graphic
+    : undefined;
+  const card = graphic?.card;
 
   return (
     <AbsoluteFill name="B-roll segment" style={{backgroundColor: '#080808', overflow: 'hidden'}}>
-      {source && asset?.kind === 'video' ? (
+      {card ? (
+        <ProductionCard
+          {...card}
+          durationInFrames={durationInFrames}
+          fps={fps}
+          width={width}
+          height={height}
+          accentColor={accentColor}
+        />
+      ) : source && asset?.kind === 'video' ? (
         <Video
           name={kind === 'source_cutaway' ? 'Project source cutaway' : 'Evidence video'}
           src={source}
@@ -358,48 +373,52 @@ export const BrollSegment: React.FC<SegmentProps> = ({
         <GraphicScene placement={placement} accentColor={accentColor} />
       )}
 
-      <AbsoluteFill style={{background: 'linear-gradient(90deg, rgba(0,0,0,.86), rgba(0,0,0,.08) 72%)'}} />
-      <Interactive.Div
-        name="Feature title"
-        style={{
-          position: 'absolute',
-          left: 96,
-          bottom: 150,
-          width: 1100,
-          color: 'white',
-          fontFamily: 'Arial, sans-serif',
-          fontSize: 84,
-          fontWeight: 800,
-          lineHeight: 1.02,
-          letterSpacing: -2,
-          opacity: interpolate(frame, [0, fadeFrames, fadeOutStart, endFrame], [0, 1, 1, 0], {
-            extrapolateLeft: 'clamp',
-            extrapolateRight: 'clamp',
-            easing: Easing.bezier(0.16, 1, 0.3, 1),
-          }),
-          translate: interpolate(frame, [0, Math.min(endFrame, 16)], ['-70px 0px', '0px 0px'], {
-            extrapolateLeft: 'clamp',
-            extrapolateRight: 'clamp',
-            easing: Easing.spring({damping: 200}),
-          }),
-        }}
-      >
-        {title}
-      </Interactive.Div>
-      <Interactive.Div
-        name="Evidence disclosure"
-        style={{
-          position: 'absolute',
-          left: 100,
-          bottom: 96,
-          color: '#d6d6d6',
-          fontFamily: 'Arial, sans-serif',
-          fontSize: 28,
-          opacity: 0.9,
-        }}
-      >
-        {disclosureFor(placement, kind)}
-      </Interactive.Div>
+      {card ? null : (
+        <>
+          <AbsoluteFill style={{background: 'linear-gradient(90deg, rgba(0,0,0,.86), rgba(0,0,0,.08) 72%)'}} />
+          <Interactive.Div
+            name="Feature title"
+            style={{
+              position: 'absolute',
+              left: 96,
+              bottom: 150,
+              width: Math.max(600, width - 192),
+              color: 'white',
+              fontFamily: 'Arial, sans-serif',
+              fontSize: width < height ? 64 : 84,
+              fontWeight: 800,
+              lineHeight: 1.02,
+              letterSpacing: -2,
+              opacity: interpolate(frame, [0, fadeFrames, fadeOutStart, endFrame], [0, 1, 1, 0], {
+                extrapolateLeft: 'clamp',
+                extrapolateRight: 'clamp',
+                easing: Easing.bezier(0.16, 1, 0.3, 1),
+              }),
+              translate: interpolate(frame, [0, Math.min(endFrame, 16)], ['-70px 0px', '0px 0px'], {
+                extrapolateLeft: 'clamp',
+                extrapolateRight: 'clamp',
+                easing: Easing.spring({damping: 200}),
+              }),
+            }}
+          >
+            {title}
+          </Interactive.Div>
+          <Interactive.Div
+            name="Evidence disclosure"
+            style={{
+              position: 'absolute',
+              left: 100,
+              bottom: 96,
+              color: '#d6d6d6',
+              fontFamily: 'Arial, sans-serif',
+              fontSize: width < height ? 22 : 28,
+              opacity: 0.9,
+            }}
+          >
+            {disclosureFor(placement, kind)}
+          </Interactive.Div>
+        </>
+      )}
     </AbsoluteFill>
   );
 };
