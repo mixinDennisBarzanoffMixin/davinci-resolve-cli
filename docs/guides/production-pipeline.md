@@ -16,7 +16,7 @@ voice isolation, and track effects are reported as unsupported.
 Three timing layers remain separate:
 
 1. Immutable ASR words with start/end seconds.
-2. Readable SRT cues, reflowed and machine-QC'd independently.
+2. Optional readable caption cues, reflowed and machine-QC'd independently.
 3. Longer editorial chunks used to keep/drop A-roll and trigger B-roll.
 
 This prevents caption line breaks from becoming edit points.
@@ -56,27 +56,43 @@ seconds. A clip that starts at record time zero but has `source_start_seconds =
 2.716667` is trimmed 2.716667 seconds into the file; it is not delayed by an
 invented timeline offset.
 
-## Bulgarian transcription and SRT
+## Word-level transcription
 
 ```bash
 dvr production transcribe --snapshot timeline.json --track 1 \
   --language bg --quality accurate --allow-model-download \
   --initial-prompt "Kia K8, LPG, двигател, автоматик, конски сили, евро" \
-  --output-dir transcript
+  --words-only --output-dir transcript
 ```
 
 `balanced` uses MLX large-v3-turbo. `accurate` uses full MLX large-v3. Outputs:
 
 - `transcript.json` with complete word timestamps and recognizer diagnostics;
-- `captions.srt` and `captions.json`;
-- `caption-qc.json` for overlap, line length, reading speed, and flashes;
+- `words.jsonl` for Bash pipelines;
+- `words.tsv` and `words.txt` for review;
+- `words.remotion.json` using Remotion's `Caption[]` fields;
 - `transcription-qc.json` for detected language, silence probability,
   repetition/compression risk, and low average log probability.
 
-A language mismatch, suspicious segment, or caption-readability warning returns
-`needs_review`; it is not reported as a clean success. Whisper confidence is a
+`--words-only` suppresses SRT, VTT, and caption-block output. Without it, the
+same run also creates `captions.srt`, `captions.vtt`, `captions.json`, and
+`caption-qc.json` for workflows that still need caption interchange.
+
+Existing transcripts can be streamed without retranscription:
+
+```bash
+dvr production words --transcript transcript/transcript.json --format jsonl \
+  | jq 'select(.confidence < 0.75)'
+dvr production words --transcript transcript/transcript.json \
+  --format remotion-json --output transcript/words.remotion.json
+```
+
+A language mismatch, suspicious segment, excessive low-confidence rate, or
+caption-readability warning returns `status: needs_review` and
+`publication_ready: false`. Artifact generation still exits successfully so a
+Bash pipeline can continue to an explicit review gate. Whisper confidence is a
 triage signal, not proof that the Bulgarian wording is correct, so publication
-still requires listening to flagged windows and reading the final SRT.
+still requires listening to flagged windows and reviewing the final words.
 Resolve's native auto-caption languages do not include Bulgarian, which is why
 this path is local ASR first.
 

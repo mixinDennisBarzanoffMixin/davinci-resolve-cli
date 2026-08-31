@@ -391,11 +391,19 @@ def transcript_words(transcript: Mapping[str, Any]) -> List[Dict[str, Any]]:
         if not math.isfinite(start_f) or not math.isfinite(end_f) or end_f <= start_f:
             continue
         confidence = word.get("confidence", word.get("probability", word.get("score")))
+        confidence_value = None
+        if confidence is not None:
+            try:
+                parsed_confidence = float(confidence)
+            except (TypeError, ValueError):
+                parsed_confidence = None
+            if parsed_confidence is not None and math.isfinite(parsed_confidence):
+                confidence_value = parsed_confidence
         normalized.append({
             "word": text,
             "start_seconds": round(start_f, 6),
             "end_seconds": round(end_f, 6),
-            **({"confidence": float(confidence)} if confidence is not None else {}),
+            **({"confidence": confidence_value} if confidence_value is not None else {}),
             **({"corrected": bool(word.get("corrected"))} if word.get("corrected") is not None else {}),
             **({"timing_provenance": str(word.get("timing_provenance"))} if word.get("timing_provenance") else {}),
         })
@@ -403,6 +411,65 @@ def transcript_words(transcript: Mapping[str, Any]) -> List[Dict[str, Any]]:
         raise ProductionPipelineError("transcript has no complete word timestamps")
     normalized.sort(key=lambda row: row["start_seconds"])
     return normalized
+
+
+def format_word_timestamps(
+    transcript: Mapping[str, Any],
+    *,
+    output_format: str = "json",
+    pretty: bool = False,
+) -> str:
+    """Serialize complete word timestamps for shell and Remotion consumers."""
+    words = transcript_words(transcript)
+    if output_format == "json":
+        return json.dumps(words, ensure_ascii=False, indent=2 if pretty else None) + "\n"
+    if output_format == "jsonl":
+        return "".join(
+            json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+            for row in words
+        )
+    if output_format == "tsv":
+        rows = ["start_seconds\tend_seconds\tconfidence\tword"]
+        for word in words:
+            text = str(word["word"]).replace("\\", "\\\\").replace("\t", "\\t")
+            text = text.replace("\r", "\\r").replace("\n", "\\n")
+            confidence = word.get("confidence")
+            rows.append(
+                f"{word['start_seconds']:.6f}\t{word['end_seconds']:.6f}\t"
+                f"{'' if confidence is None else confidence}\t{text}"
+            )
+        return "\n".join(rows) + "\n"
+    if output_format == "text":
+        def clock(seconds: float) -> str:
+            milliseconds = round(seconds * 1000)
+            hours, remainder = divmod(milliseconds, 3_600_000)
+            minutes, remainder = divmod(remainder, 60_000)
+            secs, millis = divmod(remainder, 1000)
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+        return "".join(
+            f"[{clock(word['start_seconds'])} --> {clock(word['end_seconds'])}] "
+            f"{str(word['word']).replace(chr(10), ' ').replace(chr(13), ' ')}\n"
+            for word in words
+        )
+    if output_format == "remotion-json":
+        remotion = []
+        for index, word in enumerate(words):
+            text = str(word["word"])
+            if index and not re.match(r"^[,.;:!?%…)}\]]", text) and not text.startswith("-"):
+                text = " " + text
+            remotion.append({
+                "text": text,
+                "startMs": round(float(word["start_seconds"]) * 1000),
+                "endMs": round(float(word["end_seconds"]) * 1000),
+                # The canonical transcript does not carry Whisper.cpp's t_dtw.
+                # Remotion explicitly allows null when that singular timestamp
+                # is unavailable; startMs/endMs remain the word interval.
+                "timestampMs": None,
+                "confidence": word.get("confidence"),
+            })
+        return json.dumps(remotion, ensure_ascii=False, indent=2 if pretty else None) + "\n"
+    raise ProductionPipelineError(f"unsupported word timestamp format: {output_format}")
 
 
 def caption_bundle(transcript: Mapping[str, Any]) -> Dict[str, Any]:

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from src import production_cli
 from src.utils import production_pipeline as pipeline
@@ -139,6 +142,136 @@ class TranscriptProductsTest(unittest.TestCase):
             {"word": "фаза.", "start": 0.6, "end": 1.0},
         ]}
         self.assertIn("газ-течна фаза.", pipeline.caption_bundle(transcript)["srt"])
+
+    def test_word_timestamp_formats_preserve_utf8_and_complete_timing(self):
+        transcript = {"words": [
+            {"word": "Киа", "start": 1.0, "end": 1.25, "probability": 0.9},
+            {"word": "K8", "start": 1.3, "end": 1.6},
+        ]}
+        jsonl = pipeline.format_word_timestamps(transcript, output_format="jsonl")
+        self.assertEqual(len(jsonl.splitlines()), 2)
+        self.assertEqual(json.loads(jsonl.splitlines()[0])["word"], "Киа")
+        tsv = pipeline.format_word_timestamps(transcript, output_format="tsv")
+        self.assertEqual(tsv.splitlines()[0], "start_seconds\tend_seconds\tconfidence\tword")
+        self.assertIn("1.000000\t1.250000\t0.9\tКиа", tsv)
+        text = pipeline.format_word_timestamps(transcript, output_format="text")
+        self.assertIn("[00:00:01.000 --> 00:00:01.250] Киа", text)
+
+    def test_word_timestamp_formats_drop_non_finite_confidence(self):
+        transcript = {"words": [
+            {"word": "Киа", "start": 1.0, "end": 1.25, "confidence": float("nan")},
+            {"word": "K8", "start": 1.3, "end": 1.6, "confidence": "Infinity"},
+        ]}
+        remotion = json.loads(pipeline.format_word_timestamps(
+            transcript, output_format="remotion-json"
+        ))
+        self.assertEqual([row["confidence"] for row in remotion], [None, None])
+
+    def test_remotion_word_json_uses_exact_caption_fields_and_spacing(self):
+        transcript = {"words": [
+            {"word": "Това", "start": 0, "end": 0.2, "probability": 0.8},
+            {"word": "е", "start": 0.2, "end": 0.3},
+            {"word": ".", "start": 0.3, "end": 0.4},
+        ]}
+        captions = json.loads(pipeline.format_word_timestamps(
+            transcript, output_format="remotion-json"
+        ))
+        self.assertEqual(
+            set(captions[0]),
+            {"text", "startMs", "endMs", "timestampMs", "confidence"},
+        )
+        self.assertEqual(captions[0], {
+            "text": "Това", "startMs": 0, "endMs": 200,
+            "timestampMs": None, "confidence": 0.8,
+        })
+        self.assertEqual([row["text"] for row in captions], ["Това", " е", "."])
+
+
+class WordTimestampCliTest(unittest.TestCase):
+    def test_transcribe_accepts_words_only_mode(self):
+        args = production_cli._parser().parse_args([
+            "transcribe", "--output-dir", "/tmp/words", "--words-only",
+        ])
+        self.assertTrue(args.words_only)
+
+    def test_words_writes_jsonl_to_stdout_without_status_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "transcript.json"
+            pipeline.write_json(transcript, {"words": [
+                {"word": "Здравей", "start": 2, "end": 2.5},
+            ]})
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = production_cli.main([
+                    "words", "--transcript", str(transcript), "--format", "jsonl",
+                ])
+            self.assertEqual(code, production_cli.EXIT_OK)
+            self.assertEqual(json.loads(stdout.getvalue())["word"], "Здравей")
+
+    def test_words_can_write_an_explicit_output_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "transcript.json"
+            output = Path(tmp) / "words.tsv"
+            pipeline.write_json(transcript, {"words": [
+                {"word": "дума", "start": 2, "end": 2.5},
+            ]})
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = production_cli.main([
+                    "words", "--transcript", str(transcript), "--format", "tsv",
+                    "--output", str(output),
+                ])
+            self.assertEqual(code, production_cli.EXIT_OK)
+            self.assertIn("2.000000\t2.500000\t\tдума", output.read_text())
+            receipt = json.loads(stdout.getvalue())
+            self.assertEqual(receipt["word_count"], 1)
+            self.assertFalse(receipt["source_media_modified"])
+
+    def test_words_error_uses_stderr_and_keeps_stdout_clean(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), patch("sys.stderr", stderr):
+            code = production_cli.main([
+                "words", "--transcript", "/definitely/missing/transcript.json",
+                "--format", "jsonl",
+            ])
+        self.assertEqual(code, production_cli.EXIT_ERROR)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertFalse(json.loads(stderr.getvalue())["success"])
+
+    def test_words_only_omits_backend_caption_paths_and_removes_stale_outputs(self):
+        def fake_transcribe(_audio, artifacts, _options, _capabilities):
+            self.assertNotIn("transcript_srt", artifacts)
+            self.assertNotIn("transcript_vtt", artifacts)
+            return {
+                "success": True,
+                "backend": "mock",
+                "language": "bg",
+                "segments": [],
+                "words": [{"word": "Киа", "start": 1.0, "end": 1.25, "confidence": 0.9}],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            audio = output_dir / "audio.wav"
+            audio.write_bytes(b"test-audio")
+            stale_names = ("captions.srt", "captions.vtt", "captions.json", "caption-qc.json")
+            for name in stale_names:
+                (output_dir / name).write_text("stale", encoding="utf-8")
+            args = SimpleNamespace(
+                language="bg", backend="mock", model="mock-model", initial_prompt=None,
+                allow_model_download=False, timeout=10, track=1, snapshot=None,
+                words_only=True, overwrite=True,
+            )
+            with patch("src.utils.media_analysis._transcribe", side_effect=fake_transcribe), \
+                    patch("src.utils.media_analysis.detect_capabilities", return_value={}):
+                result = production_cli._transcribe(str(audio), output_dir, args)
+            self.assertTrue(result["success"])
+            self.assertTrue(result["review_required"])
+            self.assertEqual(len(result["removed_stale_caption_outputs"]), len(stale_names))
+            self.assertFalse(any((output_dir / name).exists() for name in stale_names))
+            transcript = pipeline.read_json(output_dir / "transcript.json")
+            self.assertEqual(transcript["words"][0]["timing_provenance"], "mock_reported")
 
 
 class ResearchAndBrollTest(unittest.TestCase):

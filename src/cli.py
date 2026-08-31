@@ -867,7 +867,7 @@ def completion_candidates(words: List[str]) -> List[str]:
         elif command == "production":
             if len(complete) == 1:
                 candidates = [
-                    "doctor", "setup", "inspect", "init", "extract-track", "transcribe", "correct", "chunk",
+                    "doctor", "setup", "inspect", "init", "extract-track", "transcribe", "words", "correct", "chunk",
                     "research", "plan", "apply-a-roll", "attach-asset", "remotion", "import-broll",
                 ]
             else:

@@ -314,6 +314,22 @@ class NpmLauncherParityTests(unittest.TestCase):
         ):
             self.assertIn(command, batch_help)
 
+    def test_historical_launcher_help_discovers_production_words(self):
+        proc = subprocess.run(
+            ["node", "bin/davinci-resolve-mcp.mjs", "--help"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        production_usage = next(
+            line for line in proc.stdout.splitlines()
+            if "davinci-resolve-mcp production <" in line
+        )
+        self.assertIn("|words|", production_usage)
+
     def test_launcher_retains_all_management_dispatch_branches(self):
         # Do not execute setup, the long-running servers, or the control panel
         # in an offline parity test.  Their explicit launcher branches are the

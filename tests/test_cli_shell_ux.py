@@ -95,6 +95,11 @@ class DynamicCompletionTests(unittest.TestCase):
             "caption preset values must not leak into unrelated actions",
         )
 
+    def test_production_words_command_completes(self):
+        from src.cli import completion_candidates
+
+        self.assertEqual(completion_candidates(["production", "wo"]), ["words"])
+
     def test_hidden_completion_endpoint_preserves_option_words(self):
         from contextlib import redirect_stdout
 

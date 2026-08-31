@@ -10,6 +10,7 @@ import subprocess
 import sys
 import importlib.util
 import platform
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -19,6 +20,11 @@ from src.utils import production_pipeline as pipeline
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
+
+
+@dataclass(frozen=True)
+class _RawOutput:
+    text: str
 
 
 def _emit(payload: Any, *, pretty: bool = False) -> None:
@@ -61,12 +67,16 @@ def _transcribe(audio: str, output_dir: Path, args: argparse.Namespace) -> Dict[
     from src.utils import media_analysis
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    words_only = bool(getattr(args, "words_only", False))
     artifacts = {
         "analysis_json": str(output_dir / "analysis.json"),
         "transcript_json": str(output_dir / "transcript.json"),
-        "transcript_srt": str(output_dir / "captions.srt"),
-        "transcript_vtt": str(output_dir / "captions.vtt"),
     }
+    if not words_only:
+        artifacts.update({
+            "transcript_srt": str(output_dir / "captions.srt"),
+            "transcript_vtt": str(output_dir / "captions.vtt"),
+        })
     requested_language = str(args.language or "auto").strip()
     recognizer_language = None if requested_language.casefold() in {"auto", "detect"} else requested_language
     initial_prompt = args.initial_prompt
@@ -99,10 +109,17 @@ def _transcribe(audio: str, output_dir: Path, args: argparse.Namespace) -> Dict[
         raise pipeline.ProductionPipelineError(
             str(result.get("error") or result.get("reason") or "transcription failed")
         )
-    bundle = pipeline.caption_bundle(result)
+    normalized_words = pipeline.transcript_words(result)
+    bundle = None if words_only else pipeline.caption_bundle(result)
+    backend = str(result.get("backend") or args.backend or "unknown")
+    default_timing_provenance = (
+        "whisper_cross_attention"
+        if backend in {"mlx_whisper", "whisper_cli"}
+        else f"{backend}_reported"
+    )
     words = [
-        {**row, "timing_provenance": row.get("timing_provenance") or "whisper_cross_attention"}
-        for row in bundle["words"]
+        {**row, "timing_provenance": row.get("timing_provenance") or default_timing_provenance}
+        for row in normalized_words
     ]
     provenance = {
         "audio_path": str(Path(audio).resolve()),
@@ -117,10 +134,33 @@ def _transcribe(audio: str, output_dir: Path, args: argparse.Namespace) -> Dict[
     }
     transcript_payload = {**result, "words": words, "provenance": provenance}
     pipeline.write_json(output_dir / "transcript.json", transcript_payload)
-    pipeline.write_json(output_dir / "captions.json", bundle["blocks"])
-    pipeline.write_json(output_dir / "caption-qc.json", bundle["qc"])
-    pipeline.write_text(output_dir / "captions.srt", bundle["srt"])
-    pipeline.write_text(output_dir / "captions.vtt", bundle["vtt"])
+    removed_caption_outputs = []
+    if words_only and bool(getattr(args, "overwrite", False)):
+        for name in ("captions.srt", "captions.vtt", "captions.json", "caption-qc.json"):
+            stale_path = output_dir / name
+            if stale_path.is_file():
+                stale_path.unlink()
+                removed_caption_outputs.append(str(stale_path.resolve()))
+    word_outputs = {
+        "jsonl": output_dir / "words.jsonl",
+        "tsv": output_dir / "words.tsv",
+        "text": output_dir / "words.txt",
+        "remotion-json": output_dir / "words.remotion.json",
+    }
+    for output_format, path in word_outputs.items():
+        pipeline.write_text(
+            path,
+            pipeline.format_word_timestamps(
+                transcript_payload,
+                output_format=output_format,
+                pretty=output_format == "remotion-json",
+            ),
+        )
+    if bundle is not None:
+        pipeline.write_json(output_dir / "captions.json", bundle["blocks"])
+        pipeline.write_json(output_dir / "caption-qc.json", bundle["qc"])
+        pipeline.write_text(output_dir / "captions.srt", bundle["srt"])
+        pipeline.write_text(output_dir / "captions.vtt", bundle["vtt"])
     expected = requested_language.split("-")[0].casefold()
     detected = str(result.get("language") or "unknown").split("-")[0].casefold()
     suspicious = []
@@ -166,14 +206,14 @@ def _transcribe(audio: str, output_dir: Path, args: argparse.Namespace) -> Dict[
         "suspicious_segments": suspicious,
         "low_confidence_word_count": len(low_confidence_words),
         "low_confidence_words": low_confidence_words,
-        "caption_qc": bundle["qc"],
+        "caption_qc": bundle["qc"] if bundle is not None else None,
         "human_audio_review_required": True,
     }
     low_confidence_rate = len(low_confidence_words) / max(1, len(words))
     quality["low_confidence_word_rate"] = round(low_confidence_rate, 4)
     if (
         quality["language_matches"] is False
-        or not bundle["qc"].get("passed")
+        or (bundle is not None and not bundle["qc"].get("passed"))
         or suspicious
         or low_confidence_rate > 0.10
         or quality["human_audio_review_required"]
@@ -181,14 +221,18 @@ def _transcribe(audio: str, output_dir: Path, args: argparse.Namespace) -> Dict[
         quality["status"] = "needs_review"
     pipeline.write_json(output_dir / "transcription-qc.json", quality)
     return {
-        "success": quality["status"] == "passed",
+        "success": True,
+        "publication_ready": quality["status"] == "passed",
+        "review_required": quality["status"] != "passed",
         "status": quality["status"],
         "backend": result.get("backend"),
         "language": result.get("language"),
         "word_count": len(words),
-        "caption_count": len(bundle["blocks"]),
+        "caption_count": len(bundle["blocks"]) if bundle is not None else 0,
         "output_dir": str(output_dir.resolve()),
-        "caption_qc": bundle["qc"],
+        "word_outputs": {key: str(path.resolve()) for key, path in word_outputs.items()},
+        "removed_stale_caption_outputs": removed_caption_outputs,
+        "caption_qc": bundle["qc"] if bundle is not None else None,
         "transcription_qc": quality,
     }
 
@@ -243,6 +287,34 @@ def _cmd_chunk(args: argparse.Namespace) -> Dict[str, Any]:
     if args.output:
         pipeline.write_json(args.output, result)
     return result
+
+
+def _cmd_words(args: argparse.Namespace) -> Dict[str, Any] | _RawOutput:
+    source_path = Path(args.transcript).expanduser().resolve()
+    transcript = pipeline.read_json(source_path)
+    text = pipeline.format_word_timestamps(
+        transcript,
+        output_format=args.format,
+        pretty=bool(args.pretty),
+    )
+    if not args.output or args.output == "-":
+        return _RawOutput(text)
+    output_path = Path(args.output).expanduser().resolve()
+    if output_path == source_path:
+        raise pipeline.ProductionPipelineError("word output must not overwrite its source transcript")
+    if output_path.exists() and not args.overwrite:
+        raise pipeline.ProductionPipelineError(
+            f"word output already exists: {output_path}; pass --overwrite to replace it"
+        )
+    pipeline.write_text(output_path, text)
+    return {
+        "success": True,
+        "format": args.format,
+        "word_count": len(pipeline.transcript_words(transcript)),
+        "input": str(source_path),
+        "output": str(output_path),
+        "source_media_modified": False,
+    }
 
 
 def _cmd_correct(args: argparse.Namespace) -> Dict[str, Any]:
@@ -835,7 +907,7 @@ def _parser() -> argparse.ArgumentParser:
     extract.add_argument("--plan-only", action="store_true")
     extract.set_defaults(handler=_cmd_extract)
 
-    transcribe = sub.add_parser("transcribe", help="Bulgarian word timestamps + SRT from a file or Resolve audio track")
+    transcribe = sub.add_parser("transcribe", help="Bulgarian word timestamps and captions from a file or Resolve audio track")
     source = transcribe.add_mutually_exclusive_group()
     source.add_argument("--audio")
     source.add_argument("--snapshot")
@@ -851,8 +923,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     transcribe.add_argument("--allow-model-download", action="store_true")
     transcribe.add_argument("--overwrite", action="store_true")
+    transcribe.add_argument(
+        "--words-only",
+        action="store_true",
+        help="write word timestamp artifacts without SRT, VTT, or caption blocks",
+    )
     transcribe.add_argument("--timeout", type=int, default=3600)
     transcribe.set_defaults(handler=_cmd_transcribe)
+
+    words = sub.add_parser("words", help="emit word-level timestamps from an existing transcript JSON")
+    words.add_argument("--transcript", required=True)
+    words.add_argument(
+        "--format",
+        choices=("json", "jsonl", "tsv", "text", "remotion-json"),
+        default="json",
+    )
+    words.add_argument("--output", help="write to a file instead of stdout; '-' also means stdout")
+    words.add_argument("--overwrite", action="store_true")
+    words.set_defaults(handler=_cmd_words)
 
     chunk = sub.add_parser("chunk", help="turn word timestamps into editable A-roll chunks")
     chunk.add_argument("--transcript", required=True)
@@ -943,17 +1031,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
     try:
         result = args.handler(args)
+        if isinstance(result, _RawOutput):
+            sys.stdout.write(result.text)
+            return EXIT_OK
         _emit(result, pretty=args.pretty)
         return EXIT_ERROR if isinstance(result, dict) and result.get("success") is False else EXIT_OK
     except pipeline.ProductionPipelineError as exc:
-        _emit({"success": False, "error": str(exc)})
+        error = {"success": False, "error": str(exc)}
+        if getattr(args, "command", None) == "words":
+            sys.stderr.write(json.dumps(error, ensure_ascii=False) + "\n")
+        else:
+            _emit(error)
         return EXIT_ERROR
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
         if os.environ.get("DVR_DEBUG"):
             raise
-        _emit({"success": False, "error": f"{type(exc).__name__}: {exc}"})
+        error = {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+        if getattr(args, "command", None) == "words":
+            sys.stderr.write(json.dumps(error, ensure_ascii=False) + "\n")
+        else:
+            _emit(error)
         return EXIT_ERROR
 
 
