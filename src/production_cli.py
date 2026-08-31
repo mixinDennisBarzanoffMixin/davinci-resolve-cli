@@ -244,6 +244,185 @@ def _cmd_inspect(args: argparse.Namespace) -> Dict[str, Any]:
     return snapshot
 
 
+def _require_recoverable_production_target(root: Path, current: Dict[str, Any]) -> Dict[str, Any]:
+    state_path = root / "a-roll-apply.json"
+    if not state_path.is_file():
+        raise pipeline.ProductionPipelineError(
+            f"recoverable A-roll state is missing: {state_path}"
+        )
+    state = pipeline.read_json(state_path)
+    expected_id = str(state.get("target_timeline_id") or "")
+    if not expected_id or str(current.get("id") or "") != expected_id:
+        raise pipeline.ProductionPipelineError(
+            "the current Resolve timeline is not this production's recoverable A-roll target"
+        )
+    return state
+
+
+def _cmd_audio_clean(args: argparse.Namespace) -> Dict[str, Any]:
+    """Plan/apply recoverable track-level Voice Isolation cleanup."""
+
+    from src import server
+    from src.utils import audio_cleanup
+
+    root = Path(args.project_dir).expanduser().resolve()
+    if not root.is_dir():
+        raise pipeline.ProductionPipelineError(f"production directory does not exist: {root}")
+    current = server.timeline("get_current", {})
+    if current.get("error"):
+        raise pipeline.ProductionPipelineError(str(current["error"]))
+    _require_recoverable_production_target(root, current)
+
+    try:
+        if args.restore_receipt:
+            saved = pipeline.read_json(args.restore_receipt)
+            receipt = saved.get("receipt") if isinstance(saved, dict) else None
+            plan = audio_cleanup.build_restore_plan(receipt or saved)
+            track_index = int(plan["dispatch"]["params"]["track_index"])
+        else:
+            track_index = int(args.track)
+            track_state = server.timeline("probe_audio_track", {"track_index": track_index})
+            plan = audio_cleanup.build_track_cleanup_plan(
+                timeline_id=str(current.get("id") or ""),
+                timeline_name=str(current.get("name") or ""),
+                track_index=track_index,
+                track_state=track_state,
+                preset=args.preset,
+                amount=args.amount,
+            )
+    except audio_cleanup.AudioCleanupError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+
+    plan_path = Path(args.output).expanduser().resolve() if args.output else root / f"audio-clean-plan-a{track_index}.json"
+    pipeline.write_json(plan_path, plan)
+    if not args.apply:
+        return {**plan, "artifact": str(plan_path)}
+    reviewer = str(args.reviewer or "").strip()
+    if not reviewer:
+        raise pipeline.ProductionPipelineError("--reviewer is required with --apply")
+
+    try:
+        receipt = audio_cleanup.apply_track_cleanup_plan(
+            plan,
+            get_current_timeline=lambda: server.timeline("get_current", {}),
+            get_track_state=lambda index: server.timeline(
+                "probe_audio_track", {"track_index": index}
+            ),
+            set_voice_isolation=lambda index, state: server.timeline(
+                "set_voice_isolation_state", {"track_index": index, "state": dict(state)}
+            ),
+            authorized=True,
+        )
+    except audio_cleanup.AudioCleanupError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    applied = {
+        "success": True,
+        "review": {"reviewer": reviewer, "listening_review_required": True},
+        "receipt": receipt,
+        "source_media_modified": False,
+    }
+    receipt_path = root / f"audio-clean-applied-a{track_index}.json"
+    pipeline.write_json(receipt_path, applied)
+    return {**applied, "artifact": str(receipt_path), "plan_artifact": str(plan_path)}
+
+
+def _cmd_add_outro(args: argparse.Namespace) -> Dict[str, Any]:
+    """Plan/apply a video-only post-roll append at the exact current end frame."""
+
+    from src import server
+    from src.utils import postroll
+
+    root = Path(args.project_dir).expanduser().resolve()
+    if not root.is_dir():
+        raise pipeline.ProductionPipelineError(f"production directory does not exist: {root}")
+    snapshot = _live_snapshot()
+    _require_recoverable_production_target(root, snapshot)
+    try:
+        plan = postroll.build_postroll_plan(
+            args.path,
+            snapshot,
+            track_index=args.video_track,
+            require_matching_dimensions=not args.allow_dimension_mismatch,
+        )
+    except postroll.PostrollError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    plan_path = Path(args.output).expanduser().resolve() if args.output else root / "outro-plan.json"
+    pipeline.write_json(plan_path, plan)
+    if not args.apply:
+        return {**plan, "artifact": str(plan_path)}
+    if not args.approve_visuals:
+        raise pipeline.ProductionPipelineError("--approve-visuals is required with --apply")
+    reviewer = str(args.reviewer or "").strip()
+    if not reviewer:
+        raise pipeline.ProductionPipelineError("--reviewer is required with --apply")
+
+    destination = int(plan["destination_video_track"])
+    count_result = server.timeline("get_track_count", {"track_type": "video"})
+    count = int(count_result.get("count") or 0)
+    while count < destination:
+        added = server.timeline("add_track", {"track_type": "video"})
+        if added.get("error") or added.get("success") is False:
+            raise pipeline.ProductionPipelineError(
+                f"could not create destination video track V{count + 1}: {added}"
+            )
+        count += 1
+
+    def import_media(path: str) -> Dict[str, Any]:
+        result = server.media_pool("safe_import_media", {"paths": [path], "dry_run": False})
+        clips = list(result.get("clips") or []) if isinstance(result, dict) else []
+        return {
+            **result,
+            "count": int(result.get("imported") or len(clips)) if isinstance(result, dict) else 0,
+            "items": [
+                {**row, "media_pool_item_id": row.get("id")}
+                for row in clips
+            ],
+        }
+
+    def readback(**query: Any) -> Dict[str, Any]:
+        live = _live_snapshot()
+        wanted_track = int(query["track_index"])
+        rows = []
+        for track in (((live.get("tracks") or {}).get("video") or {}).get("tracks") or []):
+            if int(track.get("track_index") or 0) != wanted_track:
+                continue
+            for item in track.get("items") or []:
+                if (
+                    int(item.get("start") or 0) == int(query["start_frame"])
+                    and int(item.get("end") or 0) == int(query["end_frame"])
+                    and str(item.get("media_pool_item_id") or "") == str(query["media_pool_item_id"])
+                ):
+                    rows.append({
+                        **item,
+                        "start_frame": item.get("start"),
+                        "end_frame": item.get("end"),
+                    })
+        return {
+            "timeline_id": live.get("id"),
+            "end_frame": live.get("end_frame"),
+            "count": len(rows),
+            "items": rows,
+        }
+
+    try:
+        applied = postroll.apply_postroll_plan(
+            plan,
+            authorize=True,
+            get_current_timeline=lambda: server.timeline("get_current", {}),
+            import_media=import_media,
+            append_to_timeline=lambda rows: server.media_pool(
+                "append_to_timeline", {"clip_infos": rows}
+            ),
+            readback=readback,
+        )
+    except postroll.PostrollError as exc:
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    applied["visual_approval"] = {"approved": True, "reviewer": reviewer}
+    applied_path = root / "outro-applied.json"
+    pipeline.write_json(applied_path, applied)
+    return {**applied, "artifact": str(applied_path), "plan_artifact": str(plan_path)}
+
+
 def _cmd_extract(args: argparse.Namespace) -> Dict[str, Any]:
     snapshot = _load_snapshot(args.snapshot)
     plan = pipeline.build_audio_extract_plan(
@@ -1420,6 +1599,82 @@ def _cmd_broll_publish_remotion(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+def _cmd_broll_validate(args: argparse.Namespace) -> Dict[str, Any]:
+    """Gate B-roll on ready coverage for every kept editorial chunk."""
+
+    from src.utils import broll_coverage
+    from src.utils import source_cutaways
+
+    root = _broll_project_root(args.project_dir)
+    chunks_path = _project_artifact(root, args.chunks, "guide-chunks.json")
+    native_path = _project_artifact(
+        root, args.native_selection, "broll/source-cutaway-selection.json"
+    )
+    render_path = _project_artifact(
+        root, args.render_manifest, "broll-renders/render-manifest.json"
+    )
+    if not chunks_path.is_file():
+        raise pipeline.ProductionPipelineError(f"chunk artifact is missing: {chunks_path}")
+    chunks_payload = pipeline.read_json(chunks_path)
+    kept = [row for row in (chunks_payload.get("chunks") or []) if row.get("keep", True)]
+
+    native_rows = []
+    applied_path = root / "broll" / "source-cutaway-applied.json"
+    if native_path.is_file() and applied_path.is_file():
+        selection = pipeline.read_json(native_path)
+        applied = pipeline.read_json(applied_path)
+        provenance = applied.get("provenance") or {}
+        result = applied.get("result") or {}
+        mappings = list(applied.get("mappings") or [])
+        selection_matches = (
+            provenance.get("selection_sha256") == source_cutaways.canonical_sha256(selection)
+        )
+        count_matches = int(result.get("count") or 0) == len(mappings) == len(selection.get("placements") or [])
+        if applied.get("dry_run") is False and applied.get("apply_authorized") is True and selection_matches and count_matches:
+            applied_ids = {str(row.get("placement_id") or "") for row in mappings}
+            native_rows = [
+                {**row, "status": "ready-native-reviewed"}
+                for row in selection.get("placements") or []
+                if str(row.get("id") or row.get("candidate_id") or "") in applied_ids
+            ]
+
+    rendered_rows = []
+    if render_path.is_file():
+        render_manifest = pipeline.read_json(render_path)
+        for row in render_manifest.get("rendered") or []:
+            output = Path(str(row.get("output") or "")).expanduser()
+            if output.is_file() and row.get("chunk_id"):
+                rendered_rows.append({**row, "status": "ready-rendered-reviewed"})
+    try:
+        report = broll_coverage.validate_broll_coverage(
+            kept,
+            native_rows,
+            rendered_rows,
+            ready_statuses={"ready-native-reviewed", "ready-rendered-reviewed"},
+            allow_duplicate_coverage=not args.require_one_per_chunk,
+            fail_closed=bool(args.require_all_kept),
+        )
+    except (ValueError, broll_coverage.BrollCoverageError) as exc:
+        report = getattr(exc, "report", None)
+        if report is not None:
+            output = _project_artifact(root, args.output, "broll/coverage-report.json")
+            pipeline.write_json(output, report)
+            raise pipeline.ProductionPipelineError(
+                f"{exc}; report={output}"
+            ) from exc
+        raise pipeline.ProductionPipelineError(str(exc)) from exc
+    report["source_media_modified"] = False
+    report["artifacts"] = {
+        "chunks": str(chunks_path),
+        "native_selection": str(native_path) if native_path.is_file() else None,
+        "native_applied": str(applied_path) if applied_path.is_file() else None,
+        "render_manifest": str(render_path) if render_path.is_file() else None,
+    }
+    output = _project_artifact(root, args.output, "broll/coverage-report.json")
+    pipeline.write_json(output, report)
+    return {**report, "artifact": str(output)}
+
+
 def _production_doctor() -> Dict[str, Any]:
     remotion_root = Path(
         os.environ.get("DVR_REMOTION_ROOT") or Path(__file__).resolve().parents[1] / "remotion"
@@ -1500,6 +1755,36 @@ def _parser() -> argparse.ArgumentParser:
     inspect = sub.add_parser("inspect", help="snapshot the current Resolve timeline and tracks")
     inspect.add_argument("--output")
     inspect.set_defaults(handler=_cmd_inspect)
+
+    audio_clean = sub.add_parser(
+        "audio-clean",
+        help="plan or apply recoverable Resolve Voice Isolation to one audio track",
+    )
+    audio_clean.add_argument("--project-dir", required=True)
+    audio_clean.add_argument("--track", type=int, default=1)
+    audio_clean.add_argument(
+        "--preset", choices=("off", "light", "balanced", "strong"), default="balanced"
+    )
+    audio_clean.add_argument("--amount", type=int, help="custom Voice Isolation amount, 0-100")
+    audio_clean.add_argument("--restore-receipt", help="build/apply a restore from an earlier applied receipt")
+    audio_clean.add_argument("--output", help="plan artifact path")
+    audio_clean.add_argument("--apply", action="store_true")
+    audio_clean.add_argument("--reviewer")
+    audio_clean.set_defaults(handler=_cmd_audio_clean)
+
+    add_outro = sub.add_parser(
+        "add-outro",
+        help="plan or append a reviewed video-only outro at the exact timeline end",
+    )
+    add_outro.add_argument("--project-dir", required=True)
+    add_outro.add_argument("--path", required=True)
+    add_outro.add_argument("--video-track", type=int)
+    add_outro.add_argument("--allow-dimension-mismatch", action="store_true")
+    add_outro.add_argument("--output", help="plan artifact path")
+    add_outro.add_argument("--apply", action="store_true")
+    add_outro.add_argument("--approve-visuals", action="store_true")
+    add_outro.add_argument("--reviewer")
+    add_outro.set_defaults(handler=_cmd_add_outro)
 
     extract = sub.add_parser("extract-track", help="recreate one Resolve audio track as a source-safe sidecar WAV")
     extract.add_argument("--track", type=int, required=True)
@@ -1767,6 +2052,23 @@ def _parser() -> argparse.ArgumentParser:
         help="skip pending generated assets; never bypass approval or integrity checks",
     )
     broll_publish.set_defaults(handler=_cmd_broll_publish_remotion)
+
+    broll_validate = broll_sub.add_parser(
+        "validate",
+        help="report or require ready B-roll coverage for every kept chunk",
+    )
+    broll_validate.add_argument("--project-dir", required=True)
+    broll_validate.add_argument("--chunks")
+    broll_validate.add_argument("--native-selection")
+    broll_validate.add_argument("--render-manifest")
+    broll_validate.add_argument("--output")
+    broll_validate.add_argument("--require-all-kept", action="store_true")
+    broll_validate.add_argument(
+        "--require-one-per-chunk",
+        action="store_true",
+        help="treat multiple ready placements in one chunk as a validation failure",
+    )
+    broll_validate.set_defaults(handler=_cmd_broll_validate)
 
     plan = sub.add_parser("plan", help="match research beats to transcript chunks and make render/edit manifests")
     plan.add_argument("--project-dir", required=True)

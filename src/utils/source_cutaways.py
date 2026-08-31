@@ -257,18 +257,34 @@ def build_source_cutaway_request(
         )
         if source_offset_seconds < 0:
             raise SourceCutawayError("placement.source_offset_seconds cannot be negative")
-        available_seconds = (event_record_end - event_record_start) / source_fps_timeline
-        if source_offset_seconds + duration_seconds > available_seconds + 1e-9:
+        available_timeline_frames = event_record_end - event_record_start
+        available_seconds = available_timeline_frames / source_fps_timeline
+        # The frame-reviewed event is authoritative in timeline-frame space.
+        # Do not let a positive subframe overrun through a floating tolerance,
+        # then round it back inside later.  Accepted offsets and durations are
+        # quantized once here and every downstream mapping derives from them.
+        if source_offset_seconds + duration_seconds > available_seconds:
             raise SourceCutawayError(f"placement {placement_id!r} exceeds its frame-reviewed source event")
+
+        source_offset_timeline_frames = round(source_offset_seconds * source_fps_timeline)
+        duration_timeline_frames = round(duration_seconds * source_fps_timeline)
+        if duration_timeline_frames <= 0:
+            raise SourceCutawayError(f"placement {placement_id!r} rounds to an empty reviewed range")
+        if source_offset_timeline_frames + duration_timeline_frames > available_timeline_frames:
+            raise SourceCutawayError(f"placement {placement_id!r} exceeds its frame-reviewed source event")
+        quantized_offset_seconds = source_offset_timeline_frames / source_fps_timeline
+        quantized_duration_seconds = duration_timeline_frames / source_fps_timeline
 
         item_record_start = _integer(item.get("start"), "source item start")
         item_source_start = _integer(item.get("source_start"), "source item source_start")
         item_source_end = _integer(item.get("source_end"), "source item source_end")
         item_source_fps = _positive_number(item.get("source_fps"), "source item source_fps")
-        chosen_record_start = event_record_start + round(source_offset_seconds * source_fps_timeline)
+        chosen_record_start = event_record_start + source_offset_timeline_frames
         seconds_into_item = (chosen_record_start - item_record_start) / source_fps_timeline
         source_start_frame = item_source_start + round(seconds_into_item * item_source_fps)
-        source_end_frame = source_start_frame + round(duration_seconds * item_source_fps)
+        source_end_frame = source_start_frame + round(
+            duration_timeline_frames * item_source_fps / source_fps_timeline
+        )
         if source_start_frame < item_source_start or source_end_frame > item_source_end:
             raise SourceCutawayError(f"placement {placement_id!r} exceeds the exact source media range")
         if source_end_frame <= source_start_frame:
@@ -278,7 +294,9 @@ def build_source_cutaway_request(
         if target_seconds < 0:
             raise SourceCutawayError("placement.start_seconds cannot be negative")
         record_frame = target_start + round(target_seconds * target_fps)
-        record_end_frame = record_frame + round(duration_seconds * target_fps)
+        record_end_frame = record_frame + round(
+            duration_timeline_frames * target_fps / source_fps_timeline
+        )
         if record_frame < target_start or record_end_frame > target_end:
             raise SourceCutawayError(f"placement {placement_id!r} is outside the target timeline")
         if record_end_frame <= record_frame:
@@ -308,11 +326,13 @@ def build_source_cutaway_request(
             "source_item_sha256": actual_source_hash,
             "source_seconds": {
                 "event_start": event.get("start_seconds"),
-                "offset": source_offset_seconds,
-                "duration": duration_seconds,
+                "offset": quantized_offset_seconds,
+                "duration": quantized_duration_seconds,
+                "requested_offset": source_offset_seconds,
+                "requested_duration": duration_seconds,
             },
             "source_frames": {"start": source_start_frame, "end_exclusive": source_end_frame},
-            "target_seconds": {"start": target_seconds, "duration": duration_seconds},
+            "target_seconds": {"start": target_seconds, "duration": quantized_duration_seconds},
             "target_frames": {"start": record_frame, "end_exclusive": record_end_frame},
         })
     if not clip_infos:

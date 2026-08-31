@@ -867,14 +867,14 @@ def completion_candidates(words: List[str]) -> List[str]:
         elif command == "production":
             if len(complete) == 1:
                 candidates = [
-                    "doctor", "setup", "inspect", "init", "extract-track", "transcribe", "words", "correct", "chunk",
+                    "doctor", "setup", "inspect", "audio-clean", "add-outro", "init", "extract-track", "transcribe", "words", "correct", "chunk",
                     "research", "music", "broll", "plan", "apply-a-roll", "attach-asset", "remotion", "import-broll",
                 ]
             elif len(complete) == 2 and complete[1] == "music":
                 candidates = ["search", "select"]
             elif len(complete) == 2 and complete[1] == "broll":
                 candidates = [
-                    "context", "ideate", "select", "source-plan", "source-apply",
+                    "context", "ideate", "select", "validate", "source-plan", "source-apply",
                     "asset-record", "asset-review", "publish-remotion",
                 ]
             else:

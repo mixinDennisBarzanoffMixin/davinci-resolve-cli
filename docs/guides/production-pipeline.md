@@ -311,6 +311,61 @@ imagery is unavailable it produces a diagram/card and keeps the evidence and
 write until that variant is current, every render matches the latest manifest,
 and `--approve-visuals` explicitly records the final visual-review decision.
 
+Require ready coverage across every kept narration chunk after the native and
+rendered passes are available:
+
+```bash
+dvr production broll validate --project-dir /path/to/run --require-all-kept
+```
+
+The report unions frame-reviewed native cutaways and reviewed rendered clips by
+`chunk_id`. Pending, rejected, missing, or stale artifacts do not count. Short
+chunks remain in the denominator, and multiple useful cutaways in a long chunk
+are reported without inflating the coverage total.
+
+Append an existing reviewed end card as true post-roll, rather than attaching
+it to the last narration beat:
+
+```bash
+# Dry-run: hashes and probes the existing file, then binds it to the exact end frame.
+dvr production add-outro --project-dir /path/to/run --path /path/to/outro.mp4
+
+# Explicit Resolve write. Only video is appended; embedded/silent audio is ignored.
+dvr production add-outro --project-dir /path/to/run --path /path/to/outro.mp4 \
+  --video-track 2 --apply --approve-visuals --reviewer editor-name
+```
+
+The outro is not copied, transcoded, or rewritten. The apply step verifies the
+exact timeline ID/end frame, imported Media Pool item, destination track, and
+post-append range.
+
+## Dialogue cleanup
+
+Resolve Studio exposes Voice Isolation through the public scripting API. The
+production wrapper makes that control dry-run-first and recoverable:
+
+```bash
+# Inspect the exact A1 state and plan a conservative 50% starting point.
+dvr production audio-clean --project-dir /path/to/run --track 1 \
+  --preset balanced
+
+# Listen, then explicitly apply if appropriate.
+dvr production audio-clean --project-dir /path/to/run --track 1 \
+  --preset balanced --apply --reviewer editor-name
+
+# Restore from the hash-bound receipt written by the apply step.
+dvr production audio-clean --project-dir /path/to/run \
+  --restore-receipt /path/to/run/audio-clean-applied-a1.json
+```
+
+Presets are `light` (30), `balanced` (50), `strong` (70), and `off` (0); an
+integer `--amount 0..100` overrides them. Apply verifies the recoverable target,
+unlocked track state, setter result, and exact readback, and rolls back a failed
+or ambiguous mutation. This is not advertised as Adobe Enhance Speech:
+Dialogue Leveler, FairlightFX parameters, and Fairlight Audio Assistant are not
+exposed as reliable per-parameter scripting controls. Named Fairlight presets
+remain a separate whole-timeline operation.
+
 ## Current Resolve boundary
 
 The public scripting API cannot programmatically import SRT into a native

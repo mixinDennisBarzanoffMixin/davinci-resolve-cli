@@ -356,6 +356,30 @@ class ResearchPromptTest(unittest.TestCase):
 
 
 class ProductionCliContractTest(unittest.TestCase):
+    def test_audio_clean_and_outro_are_dry_run_first_commands(self):
+        audio = production_cli._parser().parse_args([
+            "audio-clean", "--project-dir", "/tmp/project", "--track", "2",
+            "--preset", "strong",
+        ])
+        self.assertIs(audio.handler, production_cli._cmd_audio_clean)
+        self.assertFalse(audio.apply)
+        self.assertEqual(audio.track, 2)
+        self.assertEqual(audio.preset, "strong")
+
+        outro = production_cli._parser().parse_args([
+            "add-outro", "--project-dir", "/tmp/project", "--path", "/tmp/outro.mp4",
+        ])
+        self.assertIs(outro.handler, production_cli._cmd_add_outro)
+        self.assertFalse(outro.apply)
+        self.assertFalse(outro.approve_visuals)
+
+    def test_broll_validate_can_require_all_kept_chunks(self):
+        args = production_cli._parser().parse_args([
+            "broll", "validate", "--project-dir", "/tmp/project", "--require-all-kept",
+        ])
+        self.assertIs(args.handler, production_cli._cmd_broll_validate)
+        self.assertTrue(args.require_all_kept)
+
     def test_broll_ideate_accepts_generated_only_gap_pass(self):
         args = production_cli._parser().parse_args([
             "broll", "ideate", "--project-dir", "/tmp/project", "--generated-only",

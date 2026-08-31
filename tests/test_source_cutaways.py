@@ -214,6 +214,25 @@ class SafetyGateTests(unittest.TestCase):
         with self.assertRaisesRegex(sc.SourceCutawayError, "frame-reviewed source event"):
             self.build()
 
+    def test_positive_subframe_overrun_cannot_round_back_inside_reviewed_event(self):
+        self.selection["placements"][0]["source_offset_seconds"] = 0
+        self.selection["placements"][0]["duration_seconds"] = 2.0000000001
+        with self.assertRaisesRegex(sc.SourceCutawayError, "frame-reviewed source event"):
+            self.build()
+
+    def test_duration_is_quantized_once_at_reviewed_timeline_fps(self):
+        self.selection["placements"][0]["source_offset_seconds"] = 0
+        self.selection["placements"][0]["duration_seconds"] = 1.501
+        plan = self.build()
+        mapping = plan["mappings"][0]
+        self.assertEqual(mapping["source_seconds"]["requested_duration"], 1.501)
+        self.assertEqual(mapping["source_seconds"]["duration"], 1.5)
+        self.assertEqual(mapping["target_seconds"]["duration"], 1.5)
+        self.assertEqual(
+            mapping["source_frames"]["end_exclusive"] - mapping["source_frames"]["start"],
+            90,
+        )
+
     def test_target_timeline_bounds_are_enforced(self):
         self.selection["placements"][0]["start_seconds"] = 7.5
         self.selection["placements"][0]["duration_seconds"] = 1

@@ -378,6 +378,7 @@ The open-source servers are complete and fully functional on their own.
 "Snapshot this clip's grade, validate a CDL update, and export a temp LUT"
 "Create a Fusion TextPlus overlay on the selected clip and verify graph connections"
 "Report audio channel mappings, voice isolation availability, and subtitle support"
+"Require B-roll on every kept section, append a reviewed outro, and plan recoverable dialogue cleanup"
 "Install this MCP-marked DCTL or script, classify refresh/restart needs, then remove it"
 ```
 
