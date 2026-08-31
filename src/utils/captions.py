@@ -62,6 +62,15 @@ def _clean(word: Dict[str, Any]) -> str:
     return str(word.get("word") or "").strip()
 
 
+def _join_tokens(values: Sequence[str]) -> str:
+    """Join ASR tokens without inventing spaces before punctuation."""
+    text = " ".join(value.strip() for value in values if value.strip())
+    text = re.sub(r"\s+([,.;:!?%…)\]}])", r"\1", text)
+    text = re.sub(r"([(\[{])\s+", r"\1", text)
+    text = re.sub(r"\s+(-(?=\w))", r"\1", text)
+    return text
+
+
 def _wrap(text: str, max_chars: int, max_lines: int) -> Optional[List[str]]:
     """Greedy wrap; None when it will not fit in `max_lines`.
 
@@ -149,7 +158,7 @@ def build_blocks(
     def flush() -> None:
         if not current:
             return
-        text = " ".join(_clean(w) for w in current)
+        text = _join_tokens([_clean(w) for w in current])
         lines = _wrap(text, max_chars_per_line, max_lines)
         if lines is None:
             # Never truncate caption text. A token that cannot fit inside the
@@ -169,6 +178,15 @@ def build_blocks(
         current.clear()
 
     for index, word in enumerate(timed):
+        if current:
+            candidate_start = _word_time(current[0], "start_seconds", "start") or 0.0
+            candidate_end = (
+                _word_time(word, "end_seconds", "end")
+                or _word_time(word, "start_seconds", "start")
+                or candidate_start
+            )
+            if candidate_end - candidate_start > max_block_seconds:
+                flush()
         current.append(word)
         following = timed[index + 1] if index + 1 < len(timed) else None
         if following is None:
@@ -178,10 +196,11 @@ def build_blocks(
         next_start = _word_time(following, "start_seconds", "start")
         gap = max(0.0, (next_start or 0.0) - (this_end or 0.0))
 
-        text_now = " ".join(_clean(w) for w in current)
-        text_next = f"{text_now} {_clean(following)}"
+        text_now = _join_tokens([_clean(w) for w in current])
+        text_next = _join_tokens([text_now, _clean(following)])
         block_start = _word_time(current[0], "start_seconds", "start") or 0.0
-        would_be_long = ((next_start or 0.0) - block_start) > max_block_seconds
+        next_end = _word_time(following, "end_seconds", "end") or next_start or 0.0
+        would_be_long = (next_end - block_start) > max_block_seconds
         would_not_fit = len(text_next) > capacity or _wrap(text_next, max_chars_per_line, max_lines) is None
 
         score = _break_score(word, gap, pause_break_seconds)
@@ -441,7 +460,7 @@ def audit_blocks(
             gap = start - previous["end_seconds"]
             if gap < 0:
                 issue(index, "OVERLAP", "error", "Cue overlaps the preceding cue.", overlap_seconds=round(-gap, 3))
-            elif gap < min_gap_seconds:
+            elif gap + 1e-6 < min_gap_seconds:
                 issue(index, "SHORT_GAP", "warning", "Gap from the preceding cue is below the configured minimum.", gap_seconds=round(gap, 3), minimum_seconds=min_gap_seconds)
 
         if duration <= 0:
@@ -452,9 +471,9 @@ def audit_blocks(
         printable_chars = len(" ".join(cue["lines"]))
         cps = printable_chars / duration
         cps_values.append(cps)
-        if duration < min_block_seconds:
+        if duration + 1e-6 < min_block_seconds:
             issue(index, "FLASH", "warning", "Cue display duration is below the configured readable minimum.", duration_seconds=round(duration, 3), minimum_seconds=min_block_seconds)
-        if duration > max_block_seconds:
+        if duration - 1e-6 > max_block_seconds:
             issue(index, "LONG_DISPLAY", "warning", "Cue remains on screen beyond the configured maximum.", duration_seconds=round(duration, 3), maximum_seconds=max_block_seconds)
         if len(cue["lines"]) > max_lines:
             issue(index, "TOO_MANY_LINES", "error", "Cue exceeds the configured line count.", line_count=len(cue["lines"]), maximum=max_lines)

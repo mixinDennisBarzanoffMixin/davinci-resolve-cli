@@ -96,6 +96,51 @@ overlays, not an accessibility subtitle stream, so keep or import the matched
 native caption delivery. Resolve's public API still cannot create a live
 transition or attach its native Animated effect to a subtitle track.
 
+### Automated product-video pipeline
+
+`dvr production` joins the pieces that ordinarily make product/car editing
+tedious: source-timed Resolve audio-track reconstruction, Bulgarian word-level ASR,
+independent SRT and editorial chunking, schema-constrained Codex research,
+evidence-gated B-roll matching, animated Remotion feature cards/captions, and a
+recoverable A-roll variant request.
+
+```bash
+dvr production setup
+dvr production doctor --pretty
+
+dvr production init \
+  --name kia-k8 --subject "2021 Kia K8 3.5 LPG" \
+  --url https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2 \
+  --output-dir "$HOME/Documents/car-videos/kia-k8" \
+  --primary-track 1 --guide-track 2
+
+dvr production transcribe \
+  --snapshot "$HOME/Documents/car-videos/kia-k8/timeline.json" \
+  --track 1 --language bg --quality accurate --allow-model-download \
+  --output-dir "$HOME/Documents/car-videos/kia-k8/transcript"
+
+dvr production transcribe \
+  --snapshot "$HOME/Documents/car-videos/kia-k8/timeline.json" \
+  --track 2 --language auto --quality accurate --allow-model-download \
+  --output-dir "$HOME/Documents/car-videos/kia-k8/guide-transcript"
+
+dvr production research --project-dir "$HOME/Documents/car-videos/kia-k8" --run
+dvr production plan --project-dir "$HOME/Documents/car-videos/kia-k8"
+dvr production remotion studio --project-dir "$HOME/Documents/car-videos/kia-k8"
+```
+
+The audio extractor uses Resolve's measured source trims and record positions;
+it does not rewrite source media. A2-style deliberate source slips survive. A1
+can drive Bulgarian captions while A2 independently drives chunks, cuts, and
+B-roll placement. Caption cues and editorial chunks remain different timing
+layers.
+
+Research uses live Codex web search plus strict schema/evidence validation; a
+failed or empty research run cannot silently produce B-roll. Rights-approved
+local photos/video can be staged per beat with `production attach-asset`.
+
+See the [Production Pipeline Guide](docs/guides/production-pipeline.md).
+
 Shell discovery and automation are action-aware and connection-efficient:
 
 ```bash
@@ -189,6 +234,7 @@ The command starts a loopback-only server and opens the control panel in your br
 | Advanced | `dvr advanced TOOL ACTION ...` | 19 tools / 163 actions | No |
 | Prompts/resources | `dvr prompts`, `dvr resources` | 14 prompts / 37 resource entries | Depends on item |
 | Durable batch | `dvr batch ...` | analysis jobs + project specs | Depends on command |
+| Production pipeline | `dvr production ...` | track stems, BG ASR/SRT, chunks, research, Remotion | Depends on stage |
 
 Use `dvr describe`, `dvr actions`, and the list commands as machine-readable
 discovery instead of copying a static command table. Generate shell completion
@@ -387,6 +433,7 @@ For method-by-method status, see [API Coverage and Test Results](docs/reference/
 | [AI Skill Reference](docs/SKILL.md) | Operational context for AI assistants using the compound server |
 | [Control Panel Guide](docs/guides/control-panel.md) | Local browser panel tour: Overview, Review (bin/clip/shot), Analyze, Setup, Preferences |
 | [Media Analysis Guide](docs/guides/media-analysis-guide.md) | Source-safe FFprobe, FFmpeg, Whisper, sidecar, and analysis-root workflows |
+| [Production Pipeline Guide](docs/guides/production-pipeline.md) | Selected-track extraction, Bulgarian SRT, A-roll chunks, Codex research, B-roll, and Remotion |
 | [Multicam Setup Helper Guide](docs/guides/multicam-setup-guide.md) | Stacked timeline prep, helper/API boundary, and Resolve UI conversion steps |
 | [Editorial Decision Guide](docs/guides/editorial-decision-guide.md) | Project-owned editorial craft guidance for analysis and timeline decisions |
 | [Conforming an Avid AAF](docs/guides/conforming-an-avid-aaf.md) | Why all three Resolve-native routes fail on a consolidated turnover, and which one is dangerous |

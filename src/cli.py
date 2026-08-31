@@ -744,7 +744,7 @@ Session JSONL (one response envelope per request; registries/connection stay war
 
 Management/offline commands are provided by the launcher:
   dvr advanced TOOL ACTION ...
-  dvr batch ... | setup ... | doctor ... | server ... | control-panel ...
+  dvr batch ... | production ... | setup ... | doctor ... | server ... | control-panel ...
 
 Exit codes: 0 success, 1 tool error/refusal, 2 usage/input, 3 internal, 130 interrupted
 """
@@ -752,7 +752,7 @@ Exit codes: 0 success, 1 tool error/refusal, 2 usage/input, 3 internal, 130 inte
 
 _TOP_LEVEL_COMMANDS = (
     "tools", "describe", "actions", "call", "granular", "prompts", "prompt",
-    "resources", "resource", "completion", "session", "advanced", "batch",
+    "resources", "resource", "completion", "session", "advanced", "batch", "production",
     "setup", "doctor", "server", "control-panel", "help", "version",
 )
 _COMMON_PARAMETER_FLAGS = (
@@ -864,6 +864,14 @@ def completion_candidates(words: List[str]) -> List[str]:
                 candidates = [*_COMMON_PARAMETER_FLAGS, *_schema_flags(getattr(tool, "parameters", None))]
         elif command == "completion":
             candidates = ["bash", "zsh", "fish"]
+        elif command == "production":
+            if len(complete) == 1:
+                candidates = [
+                    "doctor", "setup", "inspect", "init", "extract-track", "transcribe", "correct", "chunk",
+                    "research", "plan", "apply-a-roll", "attach-asset", "remotion", "import-broll",
+                ]
+            else:
+                candidates = list(_COMMON_PARAMETER_FLAGS)
         elif command == "advanced":
             advanced = _advanced_action_catalog()
             if len(complete) == 1:

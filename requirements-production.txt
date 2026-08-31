@@ -1,0 +1,5 @@
+# Optional high-quality production-pipeline dependencies.
+# Install into the managed Resolve CLI venv on Apple Silicon:
+#   /path/to/managed/venv/bin/python -m pip install -r requirements-production.txt
+mlx-whisper==0.4.3; platform_system == "Darwin" and platform_machine == "arm64"
+jsonschema>=4.18,<5

@@ -1,0 +1,327 @@
+{
+  "request": {
+    "listing_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2",
+    "target_language": "bg",
+    "content_type": "vehicle",
+    "audience": "Bulgarian used-car shoppers",
+    "video_goal": "Evidence-backed listing walk-through",
+    "desired_duration_sec": 157
+  },
+  "exact_item": {
+    "title": "Kia K8 3.5 LPG",
+    "seller": "CarsBG11",
+    "price": {
+      "amount": 23014,
+      "currency": "EUR",
+      "retrieved_at": "2026-08-30"
+    },
+    "identifiers": [
+      {"type": "VIN", "value": "KNAM341FBNA017861"}
+    ],
+    "facts": [
+      {
+        "id": "listing-price",
+        "label": "Текуща цена",
+        "value": 23014,
+        "unit": "EUR",
+        "scope": "exact_item",
+        "status": "seller_claim",
+        "confidence": 1.0,
+        "sources": [{"url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "source_type": "listing", "locator": "Текуща Цена"}]
+      },
+      {
+        "id": "listing-mileage",
+        "label": "Пробег",
+        "value": 112000,
+        "unit": "km",
+        "scope": "exact_item",
+        "status": "seller_claim",
+        "confidence": 0.95,
+        "sources": [{"url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "source_type": "listing", "locator": "Пробег"}]
+      },
+      {
+        "id": "listing-powertrain",
+        "label": "Двигател и трансмисия",
+        "value": "3,470 cc LPG, automatic, seller lists 240 hp",
+        "unit": "",
+        "scope": "exact_item",
+        "status": "seller_claim",
+        "confidence": 0.95,
+        "sources": [{"url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "source_type": "listing", "locator": "Технически данни"}]
+      },
+      {
+        "id": "listing-present-features",
+        "label": "Опции, маркирани като налични",
+        "value": "headlights, driver assistance/autopilot wording, heated steering wheel, ventilated seats, heated seats, parking sensors, lane monitoring",
+        "unit": "",
+        "scope": "exact_item",
+        "status": "seller_claim",
+        "confidence": 0.9,
+        "sources": [{"url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "source_type": "listing", "locator": "Опции на автомобила"}]
+      },
+      {
+        "id": "listing-identity",
+        "label": "Exact listed vehicle identity",
+        "value": "2021 seller year, white, 4 doors, located in Bulgaria",
+        "unit": "",
+        "scope": "exact_item",
+        "status": "seller_claim",
+        "confidence": 0.95,
+        "sources": [{"url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "source_type": "listing", "locator": "Допълнителна информация"}]
+      },
+      {
+        "id": "listing-promotion",
+        "label": "Optional promotion package",
+        "value": "€1,000 package: tires or Europe multimedia/navigation upgrade, registration help/fees, initial oil/filter service, one-year vignette, full warranty",
+        "unit": "",
+        "scope": "exact_item",
+        "status": "seller_claim",
+        "confidence": 0.95,
+        "sources": [{"url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "source_type": "listing", "locator": "СПЕЦИАЛНО ПРЕДЛОЖЕНИЕ"}]
+      },
+      {
+        "id": "seller-aftercare-claim",
+        "label": "Aftercare claims in the recording",
+        "value": "seller describes trained mechanics, service, Korean parts stock, and one-to-three-year guarantees",
+        "unit": "",
+        "scope": "exact_item",
+        "status": "transcript_claim",
+        "confidence": 0.9,
+        "sources": [{"url": "file:transcript-reviewed/transcript.json#t=41.060,76.580", "source_type": "transcript", "locator": "A1 Bulgarian recording, 00:41.060–01:16.580"}]
+      },
+      {
+        "id": "spoken-price-reduction",
+        "label": "Spoken summer price reduction",
+        "value": "seller says the displayed price is reduced by €1,000",
+        "unit": "EUR",
+        "scope": "exact_item",
+        "status": "transcript_claim",
+        "confidence": 0.9,
+        "sources": [{"url": "file:guide-transcript/transcript.json#t=94.300,115.100", "source_type": "transcript", "locator": "A2 guide describes the crossed-out price and €1,000 summer discount"}]
+      },
+      {
+        "id": "listing-inspection",
+        "label": "Seller inspection claims",
+        "value": "accident-free history, verified mileage, technical certificate",
+        "unit": "",
+        "scope": "exact_item",
+        "status": "seller_claim",
+        "confidence": 0.9,
+        "sources": [{"url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "source_type": "listing", "locator": "Проверен автомобил"}]
+      }
+    ],
+    "features": [
+      {"name": "heated steering wheel", "presence": "present", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "active option card"},
+      {"name": "ventilated seats", "presence": "present", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "active option card"},
+      {"name": "heated seats", "presence": "present", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "active option card"},
+      {"name": "parking sensors", "presence": "present", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "active option card"},
+      {"name": "lane monitoring", "presence": "present", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "active option card"},
+      {"name": "headlights", "presence": "present", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "active option card"},
+      {"name": "driver assistance (seller labels it autopilot)", "presence": "present", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "active option card; wording does not prove autonomous driving"},
+      {"name": "sunroof", "presence": "not_advertised", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "inactive option card"},
+      {"name": "head-up display", "presence": "not_advertised", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "inactive option card"},
+      {"name": "360 camera", "presence": "not_advertised", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "inactive option card"},
+      {"name": "blind-spot monitoring", "presence": "not_advertised", "evidence_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2", "evidence_locator": "inactive option card"}
+    ]
+  },
+  "model_or_category_context": {
+    "facts": [
+      {
+        "id": "kia-lpi-spec",
+        "label": "3.5 LPI official model specification",
+        "value": "240 PS, 314 Nm, eight-speed automatic",
+        "unit": "",
+        "scope": "model_or_category",
+        "status": "verified",
+        "confidence": 1.0,
+        "sources": [{"url": "https://www.thenewsmarket.com/news/the-kia-k8-embodies-a-high-tech--modern-and-innovative-sedan/s/ab454c19-603c-4487-b924-019f7203a179", "source_type": "manufacturer_release_mirror", "locator": "Kia Corporation release, powertrain section"}]
+      },
+      {
+        "id": "kia-k8-dimensions",
+        "label": "Body dimensions",
+        "value": "5,050 × 1,880 × 1,455–1,480 mm",
+        "unit": "mm",
+        "scope": "model_or_category",
+        "status": "verified",
+        "confidence": 1.0,
+        "sources": [
+          {
+            "url": "https://worldwide.kia.com/en/brand/our-brand/heritage/vehicles/k8",
+            "source_type": "manufacturer_original",
+            "locator": "K8 vehicle specifications"
+          }
+        ]
+      }
+    ],
+    "primary_sources": [
+      "https://worldwide.kia.com/en/brand/our-brand/heritage/vehicles/k8",
+      "https://www.thenewsmarket.com/news/the-kia-k8-embodies-a-high-tech--modern-and-innovative-sedan/s/ab454c19-603c-4487-b924-019f7203a179",
+      "https://kia.ly/wp-content/uploads/2023/04/all-new-Kia-K8.pdf"
+    ]
+  },
+  "conflicts": [
+    {
+      "field": "model_year",
+      "claims": [
+        {"value": "2021 seller year", "source_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2"},
+        {"value": "VIN character may indicate model year 2022", "source_url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2"}
+      ],
+      "safe_editorial_wording": "Обявена като 2021 г.; провери моделната година по VIN."
+    }
+  ],
+  "assets": [
+    {
+      "url": "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2",
+      "kind": "listing_image",
+      "depicts_exact_item": true,
+      "license_status": "permission_required",
+      "allowed_use": "Review seller rights/permission before commercial reuse"
+    }
+  ],
+  "b_roll_beats": [
+    {
+      "id": "price-open",
+      "fact_ids": ["listing-price", "listing-mileage"],
+      "trigger_words_bg": ["цена", "цената", "евро", "пробег", "километра"],
+      "trigger_words_guide": ["price", "pricing", "23 000", "mileage", "euro"],
+      "min_match_score": 2,
+      "duration_sec": 4,
+      "visual_type": "motion_graphic",
+      "visual_brief": "Price and mileage card over a reviewed exact-car hero image when licensed; otherwise graphic-only.",
+      "on_screen_text_bg": "23 014 € · 112 000 км",
+      "evidence_urls": ["https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2"],
+      "must_not_show": ["a different trim presented as the exact car", "an unrounded alternate mileage without attribution"]
+    },
+    {
+      "id": "lpg-powertrain",
+      "fact_ids": ["listing-powertrain", "kia-lpi-spec"],
+      "trigger_words_bg": ["газ", "LPG", "двигател", "литра", "мощност", "конски сили", "автоматик"],
+      "trigger_words_guide": ["gas", "LPG", "engine", "power", "automatic"],
+      "min_match_score": 1,
+      "duration_sec": 5,
+      "visual_type": "diagram",
+      "visual_brief": "Abstract V6-to-LPG-to-eight-speed flow diagram; illustrative, not an exact engine photograph.",
+      "on_screen_text_bg": "3.5 LPI · 240 PS · 8-степенен автоматик",
+      "evidence_urls": [
+        "https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2",
+        "https://www.thenewsmarket.com/news/the-kia-k8-embodies-a-high-tech--modern-and-innovative-sedan/s/ab454c19-603c-4487-b924-019f7203a179"
+      ],
+      "must_not_show": ["gasoline GDI engine labeled as this LPG engine", "AWD claim", "unverified LPG tank location"]
+    },
+    {
+      "id": "comfort-features",
+      "fact_ids": ["listing-present-features"],
+      "trigger_words_bg": ["седалки", "вентилация", "отопление", "волан", "комфорт"],
+      "trigger_words_guide": ["seats", "heating", "ventilated", "massage", "comfort"],
+      "min_match_score": 2,
+      "duration_sec": 5,
+      "visual_type": "motion_graphic",
+      "visual_brief": "Animate neutral seat/steering-wheel icons unless exact controls are visible in reviewed listing images.",
+      "on_screen_text_bg": "Отопление и вентилация според обявата",
+      "evidence_urls": ["https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2"],
+      "must_not_show": ["Nappa leather claim", "Ergo Motion claim", "controls from another trim"]
+    },
+    {
+      "id": "driver-assistance",
+      "fact_ids": ["listing-present-features"],
+      "trigger_words_bg": ["автопилот", "асистент", "лента", "парктроник", "паркиране"],
+      "trigger_words_guide": ["assistance", "lane", "parking", "sensors"],
+      "min_match_score": 2,
+      "duration_sec": 5,
+      "visual_type": "motion_graphic",
+      "visual_brief": "Lane and parking-sensor graphics with seller-attribution language.",
+      "on_screen_text_bg": "Асистенти според обявата",
+      "evidence_urls": ["https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2"],
+      "must_not_show": ["autonomous driving", "head-up display", "360 camera", "blind-spot monitoring"]
+    },
+    {
+      "id": "exterior-identity",
+      "fact_ids": ["listing-identity"],
+      "trigger_words_bg": ["Kia", "K8", "автомобил", "дизайн", "харесван", "бестселър"],
+      "trigger_words_guide": ["Kia", "K8", "design", "bestseller", "standing", "front", "cars"],
+      "min_match_score": 2,
+      "duration_sec": 5,
+      "visual_type": "motion_graphic",
+      "visual_brief": "Model-name and silhouette motion graphic; replace with reviewed exact-car imagery only after reuse rights are cleared.",
+      "on_screen_text_bg": "Kia K8 · бял · 2021 според обявата",
+      "evidence_urls": ["https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2"],
+      "must_not_show": ["another color presented as exact", "unsupported trim badge", "unlicensed gallery reuse"]
+    },
+    {
+      "id": "aftercare-service",
+      "fact_ids": ["seller-aftercare-claim"],
+      "trigger_words_bg": ["сервиз", "механици", "части", "Корея", "поддържан", "обслужвате"],
+      "trigger_words_guide": ["service", "mechanics", "spare", "parts", "Korea", "maintained"],
+      "min_match_score": 2,
+      "duration_sec": 5,
+      "visual_type": "motion_graphic",
+      "visual_brief": "Service-path graphic: trained mechanics, parts stock, maintenance; clearly attribute every point to the seller's spoken claim.",
+      "on_screen_text_bg": "Сервиз и части · твърдение на продавача",
+      "evidence_urls": ["file:transcript-reviewed/transcript.json#t=41.060,76.580"],
+      "must_not_show": ["manufacturer-authorized service claim", "guaranteed parts availability", "unverified workshop footage"]
+    },
+    {
+      "id": "warranty-claim",
+      "fact_ids": ["seller-aftercare-claim"],
+      "trigger_words_bg": ["гаранция", "гаранции", "година", "години", "спокойни"],
+      "trigger_words_guide": ["guarantee", "warranty", "year", "years"],
+      "min_match_score": 1,
+      "duration_sec": 4,
+      "visual_type": "motion_graphic",
+      "visual_brief": "Calendar/shield animation; say the one-to-three-year range is spoken by the seller and requires terms review.",
+      "on_screen_text_bg": "1–3 г. гаранция според представянето",
+      "evidence_urls": ["file:transcript-reviewed/transcript.json#t=41.060,76.580"],
+      "must_not_show": ["manufacturer warranty", "coverage without terms", "unconditional full warranty"]
+    },
+    {
+      "id": "promotion-value",
+      "fact_ids": ["spoken-price-reduction"],
+      "trigger_words_bg": ["промоция", "промоции", "намаление", "1000", "евро", "жест", "цени"],
+      "trigger_words_guide": ["promotion", "summer", "discount", "thousand", "crossed", "price"],
+      "min_match_score": 2,
+      "duration_sec": 5,
+      "visual_type": "motion_graphic",
+      "visual_brief": "Animated euro value card distinguishing the webpage's optional €1,000 package from the recording's €1,000 price-reduction wording.",
+      "on_screen_text_bg": "Провери актуалната промоция и условията",
+      "evidence_urls": ["file:guide-transcript/transcript.json#t=94.300,115.100"],
+      "must_not_show": ["guaranteed discount after retrieval date", "combine package and discount as €2,000", "hide promotion conditions"]
+    },
+    {
+      "id": "inspection-reminder",
+      "fact_ids": ["listing-inspection"],
+      "trigger_words_bg": ["проверен", "пробег", "история", "сертификат", "оригинални"],
+      "trigger_words_guide": ["verified", "mileage", "history", "certificate", "inspection"],
+      "min_match_score": 2,
+      "duration_sec": 4,
+      "visual_type": "motion_graphic",
+      "visual_brief": "Checklist animation with seller attribution and a final independent VIN/history verification reminder.",
+      "on_screen_text_bg": "Проверка и история · твърдение на продавача",
+      "evidence_urls": ["https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2"],
+      "must_not_show": ["independent certification unless document is shown", "guaranteed accident-free status"]
+    },
+    {
+      "id": "closing-verification",
+      "fact_ids": ["listing-identity", "listing-price"],
+      "trigger_words_bg": ["последни", "бройки", "побързайте", "избор", "заповядайте", "изпуснете"],
+      "trigger_words_guide": ["choice", "hurry", "last units"],
+      "min_match_score": 2,
+      "duration_sec": 4,
+      "visual_type": "motion_graphic",
+      "visual_brief": "Clean end card with listing URL and a VIN/equipment/price verification prompt, not artificial scarcity graphics.",
+      "on_screen_text_bg": "Провери цена, оборудване и история по VIN",
+      "evidence_urls": ["https://www.carsbg11.com/cars/2021-kia-k8-k8-lpg-automatic-2"],
+      "must_not_show": ["countdown timer", "false stock count", "guaranteed availability"]
+    }
+  ],
+  "editorial_guardrails": [
+    "Attribute exact-car equipment to the seller unless directly verified in the footage.",
+    "Do not call the seller's Автопилот autonomous driving.",
+    "Do not advertise sunroof, HUD, 360 camera, or blind-spot monitoring; their cards are inactive.",
+    "End with a VIN/equipment/history verification reminder."
+  ],
+  "open_questions": [
+    "Confirm model year and exact trim from registration/VIN report.",
+    "Confirm which active options are visibly demonstrated in the A-roll.",
+    "Confirm commercial reuse permission for listing gallery images."
+  ]
+}

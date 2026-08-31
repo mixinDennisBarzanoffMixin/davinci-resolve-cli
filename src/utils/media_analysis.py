@@ -8,6 +8,7 @@ future ffprobe, ffmpeg, transcription, or vision work happens.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.util
 import inspect
@@ -4063,6 +4064,15 @@ def _normalize_transcript_payload(raw: Dict[str, Any], backend: str, language: O
             "end": end,
             "text": str(segment.get("text", "")).strip(),
         }
+        # Preserve recognizer diagnostics so downstream quality gates can flag
+        # low-confidence, repetitive, or silence-derived text instead of
+        # presenting every syntactically valid transcript as trustworthy.
+        for key in (
+            "avg_logprob", "no_speech_prob", "compression_ratio",
+            "temperature", "seek", "tokens",
+        ):
+            if segment.get(key) is not None:
+                normalized_segment[key] = segment[key]
         words = _normalize_word_timestamps(segment.get("words"))
         if words:
             normalized_segment["words"] = words
@@ -4083,6 +4093,9 @@ def _normalize_transcript_payload(raw: Dict[str, Any], backend: str, language: O
     }
     if all_words:
         payload["words"] = all_words
+    for key in ("duration", "model", "detected_language_probability"):
+        if raw.get(key) is not None:
+            payload[key] = raw[key]
     return payload
 
 
@@ -4160,14 +4173,37 @@ def _transcribe_with_mlx_whisper(path: str, artifacts: Dict[str, Any], transcrip
     kwargs = {}
     if transcription.get("language"):
         kwargs["language"] = transcription["language"]
-    raw = mlx_whisper.transcribe(
-        path,
-        path_or_hf_repo=model,
-        word_timestamps=_coerce_bool(transcription.get("word_timestamps", True), default=True),
-        verbose=False,
-        **kwargs,
-    )
+    if transcription.get("initial_prompt"):
+        kwargs["initial_prompt"] = str(transcription["initial_prompt"])
+    if transcription.get("condition_on_previous_text") is not None:
+        kwargs["condition_on_previous_text"] = _coerce_bool(
+            transcription.get("condition_on_previous_text"), default=True
+        )
+    if transcription.get("hallucination_silence_threshold") is not None:
+        kwargs["hallucination_silence_threshold"] = float(
+            transcription["hallucination_silence_threshold"]
+        )
+    # mlx-whisper prints language detection to stdout even with verbose=False.
+    # Production CLI stdout is a strict JSON data channel, so route library
+    # diagnostics to stderr.
+    with contextlib.redirect_stdout(sys.stderr):
+        raw = mlx_whisper.transcribe(
+            path,
+            path_or_hf_repo=model,
+            word_timestamps=_coerce_bool(transcription.get("word_timestamps", True), default=True),
+            verbose=False,
+            **kwargs,
+        )
     payload = _normalize_transcript_payload(raw, "mlx_whisper", transcription.get("language"))
+    payload["model"] = model
+    payload["decode_options"] = {
+        key: kwargs[key]
+        for key in (
+            "language", "initial_prompt", "condition_on_previous_text",
+            "hallucination_silence_threshold",
+        )
+        if key in kwargs
+    }
     _write_transcript_artifacts(payload, artifacts)
     return payload
 
@@ -4290,7 +4326,18 @@ def _transcribe(path: str, artifacts: Dict[str, Any], options: Dict[str, Any], c
     # Wall-clock timeout wrapper. Whisper / mlx_whisper / ffmpeg can hang on a
     # corrupt file or take far longer than expected on a long clip; cap them.
     caps = _resolve_active_caps()
-    timeout = caps.wall_clock_seconds_per_call
+    # Long-running, explicitly authorized CLI workflows may supply a larger
+    # outer wall-clock bound.  The existing default remains the governance cap;
+    # this opt-in does not silently relax MCP/chat calls.
+    try:
+        timeout = float(
+            transcription.get("wall_clock_seconds")
+            or caps.wall_clock_seconds_per_call
+        )
+    except (TypeError, ValueError):
+        timeout = caps.wall_clock_seconds_per_call
+    if timeout <= 0:
+        timeout = caps.wall_clock_seconds_per_call
     started_at = time.time()
 
     def _run_backend() -> Dict[str, Any]:

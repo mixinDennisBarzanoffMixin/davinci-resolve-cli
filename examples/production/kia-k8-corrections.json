@@ -1,0 +1,13 @@
+{
+  "note": "Reviewed lexical corrections for the 2026-08-30 sample recording. Recheck against audio before publication; colloquial spoken forms are preserved unless the ASR token is clearly wrong.",
+  "corrections": [
+    {"from": "имаме и още и бестселър.", "to": "имаме и още един бестселър."},
+    {"from": "економия.", "to": "икономия."},
+    {"from": "економична.", "to": "икономичен."},
+    {"from": "сервис", "to": "сервиз", "all": true},
+    {"from": "гарантии", "to": "гаранции", "all": true},
+    {"from": "може бе нага", "to": "могат веднага"},
+    {"from": "обсуждате", "to": "обслужвате"},
+    {"from": "да не спуснете", "to": "да не изпуснете"}
+  ]
+}

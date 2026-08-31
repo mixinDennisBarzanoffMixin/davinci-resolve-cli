@@ -21,6 +21,7 @@ agent-facing workflows rather than legacy direct `DaVinciResolveScript` scripts.
 | `markers/` | Timeline, timeline item, and media pool item annotation workflows |
 | `timeline/` | Timeline inspection, edit kernel operations, conform reports, and render planning |
 | `media/` | Safe ingest, metadata normalization, media analysis, and source-integrity guardrails |
+| `production/` | Listing research, Bulgarian transcript chunks, evidence-gated B-roll, and Remotion |
 
 ## Getting Started Prompt
 

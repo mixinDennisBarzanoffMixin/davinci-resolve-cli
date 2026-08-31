@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +11,9 @@ const APP_NAME = "davinci-resolve-mcp";
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = readPackageVersion();
 const MANAGED_MARKER = ".davinci-resolve-mcp-managed.json";
+const SYNC_LOCK = ".davinci-resolve-mcp-sync.lock";
+const SYNC_LOCK_TIMEOUT_MS = 30_000;
+const SYNC_LOCK_STALE_MS = 120_000;
 
 // The only hard Python floor is the MCP SDK: mcp[cli] requires 3.10+.
 // We do NOT cap the upper bound. Resolve's scripting bridge (fusionscript)
@@ -26,6 +30,7 @@ const SYNC_ITEMS = [
   "src",
   "docs",
   "examples",
+  "requirements-production.txt",
   "scripts",
   "install.py",
   "README.md",
@@ -52,6 +57,7 @@ Usage:
   davinci-resolve-mcp server [server.py options]
   davinci-resolve-mcp control-panel [control panel options]
   davinci-resolve-mcp batch <plan|run|status|list|resume|cancel> [options]
+  davinci-resolve-mcp production <doctor|setup|inspect|init|extract-track|transcribe|correct|chunk|research|plan|apply-a-roll|attach-asset|remotion|import-broll> [options]
   davinci-resolve-mcp cli <tool|command> [arguments]
   davinci-resolve-mcp advanced <tool> <action> [arguments]
   davinci-resolve-mcp --version
@@ -62,6 +68,7 @@ Examples:
   npx davinci-resolve-mcp setup --clients cursor,claude-desktop
   npx davinci-resolve-mcp doctor
   npx davinci-resolve-mcp batch run /path/to/footage --depth standard
+  npx davinci-resolve-mcp production inspect --pretty
   npx davinci-resolve-mcp batch run /path/to/footage --json > progress.log
 
 Environment:
@@ -162,23 +169,122 @@ function shouldSyncPath(sourcePath) {
   return true;
 }
 
+let cachedPackageFingerprint = null;
+
+function packageFingerprint() {
+  if (cachedPackageFingerprint) {
+    return cachedPackageFingerprint;
+  }
+  const hash = crypto.createHash("sha256");
+  const visit = (target) => {
+    if (!shouldSyncPath(target) || !fs.existsSync(target)) {
+      return;
+    }
+    const relative = path.relative(PACKAGE_ROOT, target);
+    const stat = fs.lstatSync(target);
+    if (stat.isDirectory()) {
+      hash.update(`d:${relative}\n`);
+      for (const entry of fs.readdirSync(target).sort()) {
+        visit(path.join(target, entry));
+      }
+      return;
+    }
+    if (stat.isSymbolicLink()) {
+      hash.update(`l:${relative}:${fs.readlinkSync(target)}\n`);
+      return;
+    }
+    hash.update(`f:${relative}:${stat.size}\n`);
+    hash.update(fs.readFileSync(target));
+  };
+  for (const item of SYNC_ITEMS) {
+    visit(path.join(PACKAGE_ROOT, item));
+  }
+  cachedPackageFingerprint = hash.digest("hex");
+  return cachedPackageFingerprint;
+}
+
+function managedInstallIsCurrent(root, fingerprint) {
+  try {
+    const marker = JSON.parse(fs.readFileSync(path.join(root, MANAGED_MARKER), "utf8"));
+    return marker.version === VERSION && marker.fingerprint === fingerprint &&
+      fs.existsSync(path.join(root, "src", "server.py"));
+  } catch {
+    return false;
+  }
+}
+
 function syncManagedInstall(root) {
   validateManagedRoot(root);
   if (samePath(PACKAGE_ROOT, root)) {
     return root;
   }
 
-  for (const item of SYNC_ITEMS) {
-    copyItem(item, root);
-  }
+  const release = acquireSyncLock(root);
+  try {
+    const fingerprint = packageFingerprint();
+    if (managedInstallIsCurrent(root, fingerprint)) {
+      return root;
+    }
+    for (const item of SYNC_ITEMS) {
+      copyItem(item, root);
+    }
 
-  const markerPath = path.join(root, MANAGED_MARKER);
-  fs.writeFileSync(
-    markerPath,
-    `${JSON.stringify({ name: APP_NAME, version: VERSION, managed: true, updatedAt: new Date().toISOString() }, null, 2)}\n`,
-    "utf8"
-  );
+    const markerPath = path.join(root, MANAGED_MARKER);
+    fs.writeFileSync(
+      markerPath,
+      `${JSON.stringify({
+        name: APP_NAME,
+        version: VERSION,
+        fingerprint,
+        managed: true,
+        updatedAt: new Date().toISOString(),
+      }, null, 2)}\n`,
+      "utf8"
+    );
+  } finally {
+    release();
+  }
   return root;
+}
+
+function acquireSyncLock(root) {
+  const lockPath = path.join(root, SYNC_LOCK);
+  const startedAt = Date.now();
+  const waiter = new Int32Array(new SharedArrayBuffer(4));
+
+  while (true) {
+    try {
+      fs.mkdirSync(lockPath);
+      fs.writeFileSync(
+        path.join(lockPath, "owner.json"),
+        `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`,
+        "utf8"
+      );
+      return () => fs.rmSync(lockPath, { recursive: true, force: true });
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        throw error;
+      }
+
+      try {
+        const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+        if (ageMs > SYNC_LOCK_STALE_MS) {
+          fs.rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch (statError) {
+        if (statError?.code === "ENOENT") {
+          continue;
+        }
+        throw statError;
+      }
+
+      if (Date.now() - startedAt >= SYNC_LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for managed-install sync lock: ${lockPath}`);
+      }
+      Atomics.wait(waiter, 0, 0, 50);
+    }
+  }
 }
 
 function parseExecutable(value) {
@@ -424,6 +530,20 @@ function commandBatch(args) {
   run(command, commandArgs, { cwd: root });
 }
 
+function commandProduction(args) {
+  // Production commands execute the immutable packaged source directly.  The
+  // managed install contributes only its dependency venv, so parallel Bash
+  // stages cannot invalidate one another by refreshing copied Python files.
+  const root = installRoot();
+  const python = venvPython(root) || findSupportedPython();
+  maybeWarnAbiRisk(python);
+  const [command, ...commandArgs] = pythonCommandLine(python, ["-m", "src.production_cli", ...args]);
+  run(command, commandArgs, {
+    cwd: PACKAGE_ROOT,
+    env: {...process.env, DVR_REMOTION_ROOT: path.join(PACKAGE_ROOT, "remotion")},
+  });
+}
+
 function commandCli(args) {
   // Completion is invoked on every Tab press. It is read-only and only scans
   // packaged registries/docstrings, so run it directly from the immutable npm
@@ -492,6 +612,10 @@ function main() {
     }
     if (command === "batch") {
       commandBatch(args);
+      return;
+    }
+    if (command === "production" || command === "produce") {
+      commandProduction(args);
       return;
     }
     if (command === "advanced") {

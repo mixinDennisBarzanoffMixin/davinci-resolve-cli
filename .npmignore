@@ -10,3 +10,4 @@ tmp/
 node_modules/
 *.log
 *.tgz
+remotion/node_modules/
