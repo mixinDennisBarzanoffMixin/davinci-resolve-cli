@@ -22,8 +22,10 @@ take up to 60 seconds.
 **Free edition.** Both of those preferences are Studio features; on the free
 edition `scriptapp("Resolve")` refuses a foreign process regardless. A third
 transport reaches it — a script run from **Workspace ▸ Scripts** is handed the
-live `resolve` object on any edition and re-exports it over an authenticated
-loopback listener. Install with `python scripts/install_resolve_bridge.py` and
+live `resolve` object (measured on free 21.0.3.7) and re-exports it over an
+authenticated loopback listener. Resolve 21.1 moved Python scripting to Studio:
+on free 21.1 the Scripts menu no longer lists `.py` files (#203), so on that
+build expect the bridge to have no launch path until the Console is checked. Install with `python scripts/install_resolve_bridge.py` and
 start it from that menu; once running it is used automatically when external
 scripting is unavailable, with no environment variable needed.
 `DAVINCI_RESOLVE_BRIDGE=1` *forces* it — the bridge becomes the only transport
@@ -41,6 +43,14 @@ Existing tool call sites work unchanged. Two things to know when diagnosing it:
   canary, which always lists, so "Python not detected" is distinguishable from
   "wrong folder". The preflight is macOS-only — off macOS Resolve finds Python
   by other means, and running the check there was a false alarm (#106).
+  Two follow-ups from #182 worth having in hand when a user says the menu is
+  empty despite a set `PYTHON3HOME`: the prefix needs **both**
+  `lib/libpython3.X.dylib` and `bin/python3` under that **unversioned** name
+  (Homebrew framework builds often ship only `python3.X`, so half the check
+  passes on the very interpreter people reach for), and `launchctl setenv` does
+  not survive a reboot — a bridge that listed for weeks and then stopped, with
+  no error anywhere, is usually that. `sudo ln -s "$(command -v python3)"
+  /usr/local/bin/python3` is the persistent alternative.
 - **Windows: both script folders confirmed.** `%PROGRAMDATA%` (#109) and
   `%APPDATA%` (#112) have each been shown serving the bridge on Windows 11 free
   builds. If a user reports the menu entry missing on Windows, ask whether the
@@ -108,14 +118,26 @@ directories. They are *authoring* tools — every other tool in this server wrap
 Resolve's scripting API, while these three emit and install plugin/script
 source. Status: lifecycle-verified in DaVinci Resolve Studio 20.3.2.9 for
 MCP-marked install/read/list/remove, regular DCTL `refresh_luts`, ACES/Fuse
-restart-required classification, Python installed-script execution, and
-Python/Lua `run_inline`. Use `docs/kernels/extension-authoring-kernel.md` for the
+restart-required classification. Script execution — `execute` and `run_inline` —
+was removed in v3.0.0: this server does not run caller-supplied code. Use
+`docs/kernels/extension-authoring-kernel.md` for the
 kernel boundary map, `docs/authoring/fuse-dctl-authoring.md` for the Fuse + DCTL coverage
 matrix, and `docs/authoring/script-plugin-authoring.md` for the script DSL spec and the
-conversational-execution model. For hand-authoring `.setting` template files
+install paths. For hand-authoring `.setting` template files
 (Edit effects/transitions/titles/generators and Fusion macros) — the format,
 control catalog, thumbnail conventions, install paths, and gotchas, plus copyable
 starter templates — see `docs/authoring/setting-files/`.
+
+**Plugin writes are gated like every other write.** `install` and `remove` on all
+three tools, and `script_plugin`'s `safe_install_extension` / `safe_remove_extension`,
+are registered destructive actions. An explicit `dry_run=true` on `install` or
+`remove` is refused with `DRY_RUN_UNAVAILABLE` rather than executed — for a real
+preview use `safe_install_extension` / `safe_remove_extension`, which honour
+`dry_run` themselves. `remove` is rated HIGH and is blocked while safe mode is on
+(`allow_risky_operation: true` overrides a single call); `install` is MEDIUM.
+Every call is recorded in the security audit log, and none of them archives the
+timeline — they write plugin folders, not the project. The `probe_*_lifecycle`
+actions route their installs and cleanup deletes through the same gate.
 
 Extension Authoring kernel actions (v2.16.0+) are exposed through
 `script_plugin`:
@@ -123,24 +145,20 @@ Extension Authoring kernel actions (v2.16.0+) are exposed through
 - `extension_capabilities`
 - `probe_fuse_lifecycle(name?, kind?, install?, cleanup?)`
 - `probe_dctl_lifecycle(name?, kind?, category?, install?, refresh_luts?, cleanup?)`
-- `probe_script_lifecycle(name?, language?, category?, install?, execute?, cleanup?)`
+- `probe_script_lifecycle(name?, language?, category?, install?, cleanup?)`
 - `safe_install_extension(extension_type, name, source?|kind?, dry_run?)`
 - `safe_remove_extension(extension_type, name, dry_run?)`
 - `refresh_or_restart_required(extension_type, category?)`
 - `extension_boundary_report(include_template_matrix?)`
 
 Key behavioral notes for `script_plugin`:
-- `run_inline(source, language)` runs ad-hoc Lua/Python in Resolve and returns
-  stdout + result — use this for one-off conversational queries against the
-  Resolve API instead of building+installing a script.
+- **No script execution.** `run_inline` and `execute` were removed in v3.0.0:
+  this server does not run caller-supplied code, in any form. `install` puts a
+  script in Resolve's Workspace › Scripts menu; running it is the user's action
+  inside Resolve. For conversational queries against the Resolve API, use the
+  typed tools rather than a script.
 - `language` accepts `lua`, `py`, or the human-facing aliases `python` and
   `python3`.
-- `execute(name, category, language)` runs an installed script; Python stdout
-  and stderr are captured, while installed Lua execution can return false from
-  the Python bridge even when install/read/list/remove worked.
-- Lua scripts: `fusion.Execute()` from the Python bridge is a no-op in
-  Resolve 20.x — `_run_inline_lua` works around this with `RunScript` against
-  a temp file plus completion-sentinel polling on `app:SetData/GetData`.
 - Fuse install path on macOS is `…/DaVinci Resolve/Fusion/Fuses/` (NOT
   `Support/Fusion/Fuses/` as the SDK doc lists). The MCP path helpers handle
   this; if you're staging files manually, use the path the implementation
@@ -158,15 +176,206 @@ before mutating Resolve state.
 
 ---
 
+## Reading A Result: The Operation Envelope
+
+Every compound tool return carries an `_operation` block alongside its normal
+payload. It answers the three questions that otherwise need a different key per
+tool — did it happen, was it verified, what changed:
+
+```json
+{
+  "success": true,
+  "insert_frame_absolute": 86400,
+  "shift_frames": 48,
+
+  "_operation": {
+    "status": "success",
+    "operation": "timeline.ripple_insert",
+    "execution_id": "exec_d2c123817bee",
+    "verification": {
+      "status": "passed",
+      "checks": [{"check": "readback_verification", "passed": true, "missing_items": 0}],
+      "contradiction": false
+    },
+    "changes": {"items_added": 3, "items_moved": 17, "items_deleted": 0}
+  }
+}
+```
+
+- **`status`** — `success` | `partial` | `blocked` | `failed`. `blocked` means a
+  confirm gate is waiting; the payload still carries the `confirm_token` and
+  `preview` to act on.
+- **`verification.status`** — `passed` | `failed` | `partial` | `contradiction`
+  | `unverified`. **`contradiction` is the one to stop on**: Resolve reported
+  success and the readback disagrees. **`unverified` means no evidence was
+  reported, not that the operation was checked and found clean** — if you need
+  certainty there, go and read the state back.
+- **`changes`** — the semantic delta, present only when the action declared or
+  reported one. **Absent means "not reported", never "nothing changed"**, so do
+  not read a missing `changes` as a no-op.
+- **`warnings`** — present only when there are any.
+- **`execution_id`** — correlates one call across logs and transcripts.
+
+The envelope is namespaced under `_operation` rather than merged into the top
+level because `status`, `operation`, `warnings`, `result` and `changes` are all
+already domain keys on this server (a background job's `status` is `"done"`, a
+confirm gate's is `"confirmation_required"`). The payload is passed through
+untouched; read domain values where you always read them.
+
+Change the shape with `setup(action="set_defaults", params={"result_envelope": "pure" | "legacy" | "dual"})`,
+per call with `params={"envelope": "pure"}`, or per process with
+`RESOLVE_MCP_RESULT_ENVELOPE`. `pure` returns only the envelope with the payload
+nested under `result`; `legacy` adds nothing.
+
+---
+
+## Agent Observability: Execution Traces ("Why did the editor do this?")
+
+Multi-step AI operations (such as detecting pauses, deleting multiple timeline
+items, and verifying the result) correlate across calls into unified execution
+traces. Each trace captures the user request or prompt, tool execution timing,
+cumulative semantic deltas, and verification outcomes.
+
+Example trace shape returned by `resolve_control(action="get_execution_trace")`:
+
+```json
+{
+  "execution_id": "exec_8f91c7a210bc",
+  "request": "Remove all pauses longer than 800ms",
+  "status": "success",
+  "started_at": "2026-09-04T07:30:00Z",
+  "ended_at": "2026-09-04T07:30:02Z",
+  "duration_ms": 2845,
+  "tools": [
+    {
+      "tool": "media_analysis.analyze_timeline",
+      "count": 1,
+      "duration_ms": 821
+    },
+    {
+      "tool": "timeline.delete_item",
+      "count": 17,
+      "duration_ms": 1420
+    }
+  ],
+  "changes": {
+    "items_deleted": 17
+  },
+  "verification": {
+    "status": "passed",
+    "passed": true,
+    "checks": [{"check": "readback_verification", "passed": true}]
+  },
+  "warnings": []
+}
+```
+
+### Trace Actions on `resolve_control`
+
+- **`begin_execution(request?, execution_id?, initiator?)`**: Opens a scoped
+  multi-step execution. Subsequent tool calls in the session automatically thread
+  under this `execution_id` until ended.
+- **`end_execution(execution_id?, verification?, status?, notes?)`**: Closes the
+  active execution, finalizes timestamps and aggregated metrics.
+- **`get_execution_trace(execution_id?)`** / **`get_execution(execution_id)`**:
+  Fetches the trace for a specific ID, or the most recent execution if omitted.
+- **`list_recent_executions(limit?)`**: Returns the recent execution traces
+  (newest first, default limit 20).
+- **`export_execution_report(execution_id?, format?, path?, overwrite?, include_steps?)`**:
+  Writes a Markdown or JSON audit report for a trace. The default destination is
+  `logs/execution-reports/<execution_id>.md`; pass `format: "json"` for
+  structured output, `include_steps: false` for a shorter summary, or
+  `overwrite: true` to replace an existing report.
+- **`clear_executions(dry_run?)`**: Clears the in-memory execution trace buffer.
+- **`inspect_operation(tool?, target_action?, target_params?)`**: Evaluates operation risk
+  level (`low`, `medium`, `high`, `critical`), destructive potential, confirmation
+  requirements, and blast radius scope before executing an action.
+
+  **It is a heuristic over action names, not a simulation.** It does not touch
+  the project, does not validate your parameters, and cannot tell you whether
+  the clip ids you are holding exist. Read three fields before trusting it:
+  `recognised: false` means no rule matched and the levels are name-based
+  defaults rather than a finding; `snapshot_available: null` means rollback
+  availability was not determined, never that there is none; and
+  `pre_state_available` separates "no project open" from "state never read".
+  For an actual preview, use the action's own `dry_run` where it has one.
+  Where it has none, an explicit `dry_run=true` on a registered destructive
+  action is refused with `DRY_RUN_UNAVAILABLE` (`status: dry_run_unavailable`,
+  `simulated: false`, `executed: false`, plus the same static risk block)
+  before any archive, state lookup, or handler execution. Until v2.211.0 the
+  flag was silently ignored on those actions and the mutation ran; the
+  actions that do honour it are listed in `NATIVE_DRY_RUN_ACTIONS`
+  (`src/utils/destructive_hook.py`) and pinned to the handlers by a test.
+- **`list_lifecycle_hooks()`**: Returns active execution lifecycle pipeline hooks
+  (`risk_classification`, `resolve_state_inspection`, `readback_verification`,
+  `drift_detection`, `provenance_trace`). All of them observe; none replaces a
+  tool result. `dry_run` is therefore never answered on a handler's behalf:
+  an action with a native dry-run path runs it, and every other registered
+  destructive action refuses the flag instead of either simulating or
+  executing.
+
+Explicit correlation is also supported per-call: pass `params={"execution_id": ...}`
+or `params={"trace_id": ...}` in any tool call to associate it with a specific trace.
+
+Two things to know when a trace is not where you expect it. The buffer holds the
+**100 most recent** executions and is in memory only — a server restart empties
+it, and the on-disk `logs/execution-traces.jsonl` is the durable record.
+`list_recent_executions` returns a `persistence` block naming that file and
+whether it is writable; check it before concluding that nothing was traced,
+since the append is best-effort and will never fail a real edit to report a
+logging problem.
+
+Recorded per step: tool, action, `duration_ms`, status, semantic deltas and
+verification. **Not** recorded: parameters, file paths, clip or project names.
+The only free text is the `request` string passed to `begin_execution`.
+
+The file rotates at 8 MB, keeping one previous generation as
+`execution-traces.jsonl.1`. Both are gitignored along with the rest of `logs/`.
+Audit reports are separate point-in-time exports; `RESOLVE_MCP_TRACE_REPORT_DIR`
+moves their default directory without moving the append-only trace log.
+
+`path` is honoured as given — the report can be written anywhere, and the
+directories are created to reach it. That is deliberate (a conform's paperwork
+belongs beside the conform, not in `logs/`), so treat it the way you would any
+other export destination and do not invent a path near source media. The
+`execution_id` route cannot escape the report directory: it is sanitised to a
+filename.
+
+A report whose run recorded no verification checks renders **"not established
+— no checks recorded"** in the Passed row, never "yes" — the same rule as
+`verification.status: "unverified"` in the envelope. Do not report such a run
+to the user as verified.
+
+---
+
 ## Two Server Modes
 
 | Mode | Entry point | Tool count | Use when |
 |---|---|---|---|
-| Compound (default) | `src/server.py` | 36 tools | Most workflows — keeps context lean |
-| Granular (full) | `src/server.py --full` | 353 tools | Power users needing one tool per API method |
+| Compound (default) | `src/server.py` | 37 tools | Most workflows — keeps context lean |
+| Granular (full) | `src/server.py --full` | 389 tools | Power users needing one tool per API method |
+
+Resolve 21.1 adds [twelve read-only discovery controls](reference/resolve211-read-controls.md)
+for edition, presets, audio formats/codecs, normalization modes, speed, fades
+and blanking in both server interfaces. These readers do not invoke setters.
 
 This skill document covers the **compound server** (the default). Each compound
 tool accepts an `action` string and an optional `params` object.
+
+**Granular writes are enforced, not archived.** Every destructive-hinted granular
+tool (deletes, clears, resets, replaces, sets, loads — 132 of the 387) runs
+through `granular_destructive_op`: while `destructive.safe_mode` is on, a
+HIGH-risk call is refused unless that call passes `allow_risky_operation: true`
+(a parameter the hook adds to each hooked tool's schema), and every call writes
+a row to the security audit log. Risk is read from the verb — `delete`/`remove`/
+`clear`/`reset`/`replace`/`unlink`/`quit`/`restart` are HIGH, `set`/`load`/
+`switch`/`close`/`stop` are MEDIUM — except that a tool reaching a symbol the
+`api_truth` ledger marks `destroys_prior_work` is HIGH from the ledger
+(`ti_copy_grades`), and those tools also keep their `acknowledge_trap` +
+confirm-token gate. What the granular hook does **not** do is duplicate the
+timeline into an Archive bin first, as the compound hook does: a granular write
+has no recovery version, and a refused-or-audited call is the whole of its
+safety. Use the compound server when you want the archive.
 
 ### The advanced server (`davinci-resolve-advanced-mcp`)
 
@@ -194,7 +403,17 @@ Operating rules an agent must know:
   has no API). Single clip, live: `gallery_stills.grab_and_export` → advanced
   `drx(action="relayout")` → `graph.reset_all_grades` → `safe_apply_drx` with
   EXPLICIT item indices (the reset is required — a same-structure apply keeps
-  the old layout). Whole project, offline: `project_db(action="relayout_node_graphs")`.
+  the old layout). Whole project, offline: `project_db(action="relayout_node_graphs")`
+  (closed project + quit/relaunch). Whole project or ANY SUBSET **without closing it**:
+  `project_manager.export_project` → advanced `drp(action="relayout_node_graphs")`
+  (scope by timeline/track/clip id/name/media/frames/clip position/group/version/node
+  count/node label; covers every LOCAL version of every clip, remote versions, group
+  pre/post and timeline graphs; dry-run first, read-back verified on write) →
+  `project_manager.import_project` as a sibling `<name>_CLEANED`, then re-export THAT
+  and dry-run again to prove the effect. BPA's "Node Graph Cleanup" job is this loop.
+  Layout is topology-aware (rank by RGB wiring, branches stacked into lanes at
+  `spacingY`, key links untouched); the lane pitch is NOT measured against native
+  Cleanup on a mixer graph yet — the x row is.
 - **project_db patches** require the project CLOSED in Resolve plus
   `iConfirmProjectClosed:true`; every write auto-backs-up and read-back
   verifies. Resolve caches open projects in memory: after patching, fully QUIT
@@ -207,7 +426,7 @@ Operating rules an agent must know:
 
 Per-domain depth for both servers lives in the kernels (`docs/kernels/`), each of
 which carries an "Advanced (offline) server" section where an offline counterpart
-exists. Claude Code skills in `.claude/skills/` (`resolve-color`, `resolve-edit`,
+exists. Portable skills in `.agents/skills/` (`resolve-color`, `resolve-edit`,
 `resolve-conform`, `resolve-delivery`, `resolve-media-analysis`) route
 craft ↔ live ↔ offline automatically when working in that domain.
 
@@ -480,6 +699,7 @@ specific pages. Always confirm or switch pages before calling page-sensitive too
 | Operation category | Required page | How to switch |
 |---|---|---|
 | Color grading, node graphs, CDL | Color | `resolve_control(action="open_page", params={"page": "color"})` |
+| LUT export (`export_lut`, `safe_export_lut`) | Color — measured `False` from media, edit, fusion, fairlight and deliver | `resolve_control(action="open_page", params={"page": "color"})` |
 | Gallery stills export, `grab_and_export` | Color, Gallery panel open | `resolve_control` + open Gallery panel in Workspace menu |
 | Fusion compositions (page comp) | Fusion | `resolve_control(action="open_page", params={"page": "fusion"})` |
 | Timeline editing, track operations | Edit or Cut | `resolve_control(action="open_page", params={"page": "edit"})` |
@@ -541,6 +761,16 @@ Key actions:
   Resolve API behavior (no connection needed); filter by substring
 - `verification_stats` — readback-verification tally (verified/contradicted/
   unverified) since server start (no connection needed)
+- `report_issue(kind, title, summary, …)` — when the user says "send this as a
+  bug" or "…as a feature request", draft a GitHub issue for this server. Fill
+  it from the conversation (the failing tool/action and its error verbatim,
+  expected vs actual, steps). Server version, Resolve build, connection mode
+  and OS are attached; paths, usernames, e-mails and secrets are redacted. It
+  **files nothing**: show the user the draft, then hand them the returned
+  `url` to review and submit on GitHub. Redaction cannot catch client or
+  project names written as prose, so ask the user to check. Never call it
+  unprompted; offering once after a failure that looks like a server defect
+  is fine. No connection needed, and it never launches Resolve
 - `get_page` / `open_page(page)` — read or switch the active page
 - `get_keyframe_mode` / `set_keyframe_mode(mode)`
 - `get_fairlight_presets` — Resolve 20.2.2+; returns available Fairlight
@@ -600,7 +830,11 @@ lifecycle, settings, database, preset, and archive boundary helpers:
 - `safe_project_create(name, media_location_path?, dry_run?)`
 - `safe_project_export(name, path, with_stills_and_luts?, dry_run?)`
 - `safe_project_import(path, name, dry_run?)`
-- `safe_project_archive(name, path, src_media=false, render_cache=false, proxy_media=false, dry_run?)`
+- `safe_project_archive(name, path, src_media=false, render_cache=false, proxy_media=false, allow_media_archive?, acknowledge_trap?, dry_run?)`
+  — `src_media` and `proxy_media` crash Resolve 21.1.0.14 (reported, #233); they are refused
+  unless `acknowledge_trap=true`, and every flag defaults off on `archive` too. No
+  scriptable call has produced an archive on 19.1.3.7 or 21.1.0.14; see
+  `docs/reference/project-archive.md`.
 - `safe_project_restore(path, name, dry_run?)`
 - `safe_project_delete(name, close_current?, dry_run?)`
 - `safe_set_project_settings(settings, restore?, dry_run?)`
@@ -729,8 +963,12 @@ Key actions: `get_name`, `get_metadata(key?)`, `set_metadata(key, value)`,
 `set_name(name)`, `link_full_resolution_media(path)`,
 `replace_clip_preserve_sub_clip(path)`, `monitor_growing_file`,
 `transcribe_audio(use_speaker_detection?)`, `clear_transcription`,
-`get_transcription` (read back `{text, truncated, status, has_transcription}`;
-`truncated` flags when Resolve's preview cut the text off),
+`get_transcription(include_words?, use_nested_clip_transcription?)` (read back
+`{text, segments, language, source, truncated, status, has_transcription}`; on
+Resolve 21.1+ it uses `MediaPoolItem.GetTranscription`, so `segments` carries
+`{start, end, text, speaker}` in SOURCE timecode and nothing is truncated, and
+on 21.0.x it falls back to the `Transcription` clip property, where `truncated`
+flags a cut-off preview — `source` says which route ran),
 `perform_audio_classification`,
 `analyze_for_intellisearch(identify_faces?, is_better_mode?)`, `analyze_for_slate(marker_color?)`,
 `remove_motion_blur(deblur_option?)` (Resolve 21+; AI Extras / confirm-token gated as noted above),
@@ -1677,7 +1915,8 @@ Key actions:
 Color / Grade kernel actions (v2.11.0+) add safer grade inspection and
 boundary helpers: `grade_capabilities`, `probe_grade_item`,
 `probe_node_graph`, `safe_set_cdl`, `safe_copy_grade`, `safe_apply_drx`,
-`safe_export_lut`, `grade_version_snapshot`, `grade_version_restore`,
+`apply_trace_plan` (the live half of the advanced server's identity-matched
+`color_trace`), `safe_export_lut`, `grade_version_snapshot`, `grade_version_restore`,
 `color_group_capabilities`, `gallery_capabilities`, and
 `grade_boundary_report`. See `docs/kernels/color-grade-kernel.md` for the live-tested
 support map, and `docs/guides/color-decision-guide.md` for the practical distinction
@@ -2123,6 +2362,24 @@ Resolve API returned `False`. This usually means a precondition was not met
 
 ## Known Gotchas
 
+### `copy_grades` refuses until you acknowledge it
+
+`TimelineItem.CopyGrades` **replaces** the target's grade — it does not merge —
+returns `True` while doing it, and creates no version to roll back to. Measured on
+Studio 21.1.0.14 by baking each state to a 33-point LUT: after the copy the
+target's LUT is byte-identical to the source's. Pointed at clips someone graded by
+hand, that is unrecoverable loss reported as success.
+
+So `copy_grades`, `safe_copy_grade`, `bulk_match_to_hero` and
+`timeline.apply_look_to_items` refuse until you pass `acknowledge_trap: true`. The
+refusal carries the measured fact in `known_limitation`. Before acknowledging,
+confirm the targets are actually uniform — export each one's LUT on the Color page
+and compare — rather than assuming a group shares a grade.
+
+Other recorded traps ride along on results as `known_limitation` without blocking.
+`RESOLVE_MCP_DISABLE_TRAP_GUARD=1` disables both behaviours.
+
+
 **Resolve API object lifetimes** — Objects like timelines, clips, and color groups
 returned by the API are live references that can become stale if the project state
 changes (e.g., the user deletes a timeline). Always re-fetch IDs after any
@@ -2288,3 +2545,18 @@ setups:
 | `Timeline.AnalyzeDolbyVision` | HDR / Dolby Vision content |
 
 The full API reference is in `docs/reference/resolve_scripting_api.txt`.
+
+Native Resolve 21.1 speed and fade setters: see [speed/fades](reference/resolve211-speed-fades.md) for options, version guards and contributor validation limits.
+
+Native 21.1 transition creation: see [transition controls](reference/resolve211-native-transitions.md) for options, item-index changes and contributor-rendered evidence.
+
+Native multicam creation and flattening: [21.1 controls](reference/resolve211-multicam.md), with contributor render evidence and remaining family coverage.
+Native timeline/clip output blanking: [21.1 controls](reference/resolve211-blanking.md), with explicit inheritance and pixel-bound evidence.
+
+Native audio normalization: [21.1 controls](reference/resolve211-normalization.md), with independently measured exported-audio evidence.
+
+Native timecode/waveform alignment: [21.1 controls](reference/resolve211-alignment.md), including linked-item selection semantics and rendered video/audio evidence.
+
+Resolve-native DCTL validation: [21.1 controls](reference/resolve211-dctl-validation.md), separate from static validation and shader rendering.
+
+Native DCTL encryption: [21.1 controls](reference/resolve211-encryption.md), with explicit destination handling and export-evidence limits.

@@ -60,8 +60,11 @@ async function buildSeqContainerFile(timeline, options = {}) {
   // Build lockable blob with markers
   const lockableBlob = buildLockableBlobElement(markers, lockableBlobId, frameRate);
 
-  // Calculate start frame from timecode
-  const startFrame = timecodeToFrames(startTimecode, frameRate);
+  // An explicit startFrame wins; otherwise derive it from the timecode
+  // (issue #168 — the spec field used to be ignored entirely).
+  const startFrame = Number.isFinite(options.startFrame)
+    ? Math.round(options.startFrame)
+    : timecodeToFrames(startTimecode, frameRate);
 
   // Combine video tracks: standard video tracks first, then Rich title tracks
   const allVideoTrackElements = [...videoTrackElements, ...richTitleTrackElements];
@@ -335,9 +338,15 @@ function buildLockableBlobElement(markers, blobId, frameRate) {
     ]);
   }
 
-  // Build marker protobuf (simplified - actual markers would need full encoding)
-  // For now, return minimal structure that DaVinci can parse
-  const fieldsBlobHex = buildMarkersFieldsBlob(markers, frameRate);
+  // Real Sm2SequenceLockableBlob encoding (byte-exact vs a live 19.1.3.7
+  // export; see timeline-markers-blob.js) — replaces the old simplified
+  // marker-encoder blob, whose bytes never matched a real export.
+  const { encodeTimelineMarkersBlob } = require('./timeline-markers-blob');
+  const fieldsBlobHex = encodeTimelineMarkersBlob(markers.map((m) => ({
+    frame: Number(m.frame) || 0,
+    color: m.color, name: m.name, note: m.note ?? m.description,
+    duration: m.duration, customData: m.customData,
+  }))).toString('hex');
 
   return buildXmlElement('Sm2SequenceLockableBlob', { DbId: blobId }, [
     buildXmlElement('FieldsBlob', {}, fieldsBlobHex),
@@ -360,11 +369,27 @@ function buildMarkersFieldsBlob(markers, frameRate) {
 function timecodeToFrames(timecode, fps = 24) {
   if (!timecode || typeof timecode !== 'string') return 0;
 
-  const parts = timecode.split(':').map(Number);
-  if (parts.length !== 4) return 0;
+  const dropFrame = timecode.includes(';');
+  const parts = timecode.replace(/;/g, ':').split(':').map(Number);
+  if (parts.length !== 4 || parts.some(Number.isNaN)) return 0;
 
   const [hh, mm, ss, ff] = parts;
-  return hh * 3600 * fps + mm * 60 * fps + ss * fps + ff;
+  // SMPTE timecode counts NOMINAL frames: the fields multiply by the integer
+  // base (30 for 29.97, 24 for 23.976), not the exact rate. Measured against
+  // Resolve itself (Studio 19.1.3.7): a 29.97 timeline at 01:00:00:00 reads
+  // GetStartFrame 108000 = 3600 x 30, and a 23.976 one reads 86400 = 3600 x
+  // 24. Both the pre-#168 exact-rate product (107892.107...) and its rounded
+  // fix (107892) were wrong; nominal is what Resolve stores.
+  const nominal = Math.round(fps);
+  let frames = (hh * 3600 + mm * 60 + ss) * nominal + ff;
+  if (dropFrame) {
+    // Drop-frame skips 2 (or 4 at 59.94) TC numbers per minute except every
+    // tenth minute — same formula as the Python _timecode_to_frame_id.
+    const dropped = Math.round(nominal * 0.0666666667);
+    const totalMinutes = hh * 60 + mm;
+    frames -= dropped * (totalMinutes - Math.floor(totalMinutes / 10));
+  }
+  return frames;
 }
 
 // =============================================================================
@@ -549,6 +574,7 @@ async function buildSeqContainerFiles(timelines, options = {}) {
       ...options,
       frameRate: timeline.frameRate || options.frameRate || 24,
       startTimecode: timeline.startTimecode || options.startTimecode || '01:00:00:00',
+      startFrame: timeline.startFrame ?? options.startFrame,
       markers: timeline.markers || options.markers || [],
     });
     results.push({ filename: `SeqContainer${idx + 1}.xml`, content });

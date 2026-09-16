@@ -417,7 +417,7 @@ class OperationSurfaceTests(unittest.TestCase):
     def test_media_paths_outside_the_roots_are_not_leaked(self) -> None:
         import os
         inside = os.path.join(self.ROOT, "a.mov")
-        open(inside, "w").close()
+        open(inside, "w", encoding="utf-8").close()
         ops = self._ops(clips=[("inside", inside), ("outside", "/etc/passwd")])
         by_name = {c["name"]: c["file_path"] for c in ops.dispatch("list_media", {})["clips"]}
         # Resolve's own path is returned verbatim (it is what relinking needs);
@@ -470,6 +470,73 @@ class OperationSurfaceTests(unittest.TestCase):
         listing = ops.dispatch("list_timelines", {})
         self.assertEqual(len(listing["timelines"]), 5)
         self.assertTrue(listing["truncated"])
+
+    # -- a proxied return that does not fit must SAY so ---------------------
+    #
+    # Regression: `_encode` used to shorten any list past max_items with nothing
+    # anywhere recording it, and a short list cannot be told apart from a
+    # genuinely short result. An 864-clipInfo AppendToTimeline came back as 500
+    # items, and the silence-ripple readback counted them — reporting a variant
+    # of 432 video + 432 audio as 250 + 250, which reads as dropped material.
+
+    def _counting_ops(self, produced: int):
+        class Producer:
+            def Enumerate(self_inner):
+                return [_FakeTimeline(f"T{i}") for i in range(produced)]
+
+            def GetProjectManager(self_inner):
+                return self_inner
+
+            def GetCurrentProject(self_inner):
+                return self_inner
+
+            def GetMediaPool(self_inner):
+                return self_inner
+
+        return self._ops(resolve=Producer())
+
+    def test_a_truncated_proxy_reply_reports_what_it_dropped(self) -> None:
+        ops = self._counting_ops(864)
+        ops.max_items = 500
+        reply = ops.dispatch("call", {"target": "media_pool", "method": "Enumerate"})
+        self.assertEqual(len(reply["value"]), 500)
+        truncated = reply["truncated"]
+        self.assertEqual(truncated["dropped"], 364)
+        self.assertEqual(truncated["limit"], 500)
+        self.assertEqual(truncated["containers"][0]["total"], 864)
+
+    def test_a_reply_that_fits_carries_no_truncation_key(self) -> None:
+        ops = self._counting_ops(864)
+        reply = ops.dispatch("call", {"target": "media_pool", "method": "Enumerate"})
+        self.assertEqual(len(reply["value"]), 864)
+        self.assertNotIn("truncated", reply)
+
+    def test_truncation_state_does_not_leak_between_calls(self) -> None:
+        ops = self._counting_ops(864)
+        ops.max_items = 500
+        ops.dispatch("call", {"target": "media_pool", "method": "Enumerate"})
+        ops.max_items = 2000
+        self.assertNotIn(
+            "truncated",
+            ops.dispatch("call", {"target": "media_pool", "method": "Enumerate"}),
+        )
+
+    def test_the_ceiling_never_exceeds_the_handle_table(self) -> None:
+        # A list longer than MAX_HANDLES evicts its own earliest entries while
+        # it is still being minted, so the client receives handles that are
+        # already stale. A short list beats a poisoned one.
+        from src.utils import resolve_bridge_ops as rbo
+        ops = rbo.ResolveOperations(
+            FakeResolve(), media_roots=[self.ROOT], output_roots=[self.ROOT],
+            max_items=1_000_000,
+        )
+        self.assertLessEqual(ops.max_items, rbo.ResolveOperations.MAX_HANDLES)
+
+    def test_the_default_ceiling_clears_a_timeline_scale_return(self) -> None:
+        # The reported failure sent 864 clipInfos in one append. A default that
+        # cannot carry that is the bug, not a tuning preference.
+        from src.utils import resolve_bridge_ops as rbo
+        self.assertGreater(rbo.ResolveOperations.DEFAULT_MAX_ITEMS, 864)
 
     def test_path_policy_rejects_traversal_and_relative_paths(self) -> None:
         from src.utils import resolve_bridge_ops as ops
@@ -599,6 +666,149 @@ class InstallerTargetTests(unittest.TestCase):
         sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "scripts"))
         import install_resolve_bridge
         self.installer = install_resolve_bridge
+
+    def test_config_path_defaults_to_the_client_default(self) -> None:
+        from unittest import mock
+
+        from src.utils import resolve_bridge_client
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.installer.config_path(), self.installer.DEFAULT_CONFIG_PATH)
+            self.assertEqual(self.installer.config_path(), resolve_bridge_client.config_path())
+
+    def test_config_path_override_matches_the_client_at_call_time(self) -> None:
+        import pathlib
+        import tempfile
+        from unittest import mock
+
+        from src.utils import resolve_bridge_client
+
+        first = pathlib.Path(tempfile.mkdtemp(prefix="bridge_config_a_")) / "first.json"
+        second = pathlib.Path(tempfile.mkdtemp(prefix="bridge_config_b_")) / "second.json"
+        for path in (first, second):
+            with self.subTest(path=path), mock.patch.dict(
+                os.environ, {self.installer.ENV_CONFIG_PATH: str(path)}, clear=True
+            ):
+                self.assertEqual(self.installer.config_path(), path)
+                self.assertEqual(self.installer.config_path(), resolve_bridge_client.config_path())
+
+    def test_config_path_override_expands_the_user_directory(self) -> None:
+        import pathlib
+        from unittest import mock
+
+        with mock.patch.dict(
+            os.environ,
+            {self.installer.ENV_CONFIG_PATH: "~/private/resolve-bridge.json"},
+            clear=True,
+        ):
+            self.assertEqual(
+                self.installer.config_path(),
+                pathlib.Path.home() / "private/resolve-bridge.json",
+            )
+
+    def test_existing_overridden_config_preserves_token_and_roots(self) -> None:
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+
+        config = pathlib.Path(tempfile.mkdtemp(prefix="bridge_existing_config_")) / "bridge.json"
+        token = "p" * 48
+        config.write_text(
+            json.dumps({
+                "token": token,
+                "allowed_media_roots": ["/existing/media"],
+                "allowed_output_roots": ["/existing/output"],
+            }),
+            encoding="utf-8",
+        )
+        with mock.patch.dict(
+            os.environ, {self.installer.ENV_CONFIG_PATH: str(config)}, clear=True
+        ):
+            result = self.installer.ensure_config(port=50124, rotate=False)
+
+        self.assertEqual(result["token"], token)
+        self.assertEqual(result["port"], 50124)
+        self.assertEqual(result["allowed_media_roots"], ["/existing/media"])
+        self.assertEqual(result["allowed_output_roots"], ["/existing/output"])
+
+    def test_invalid_existing_overridden_config_is_replaced_safely(self) -> None:
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+
+        config = pathlib.Path(tempfile.mkdtemp(prefix="bridge_invalid_config_")) / "bridge.json"
+        config.write_text("{not valid json", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ, {self.installer.ENV_CONFIG_PATH: str(config)}, clear=True
+        ):
+            result = self.installer.ensure_config(port=50125, rotate=False)
+
+        self.assertEqual(result["port"], 50125)
+        self.assertGreaterEqual(len(result["token"]), 43)
+        self.assertEqual(json.loads(config.read_text(encoding="utf-8")), result)
+
+    def test_install_writes_embeds_and_reports_the_overridden_config(self) -> None:
+        import base64
+        import pathlib
+        import stat
+        import tempfile
+        from unittest import mock
+
+        root = pathlib.Path(tempfile.mkdtemp(prefix="bridge_custom_config_"))
+        config = root / "private config" / "bridge.json"
+        target = root / "Fusion/Scripts/Utility"
+        env = {self.installer.ENV_CONFIG_PATH: str(config)}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(self.installer, "script_targets", return_value=[target]), \
+                mock.patch.object(self.installer, "python_preflight", return_value={"ok": True}), \
+                mock.patch.object(self.installer, "stale_container_warning", return_value=None):
+            result = self.installer.install(probe_only=False, port=50123, rotate=False)
+
+        self.assertEqual(result["config"]["path"], str(config))
+        self.assertEqual(result["config"]["port"], 50123)
+        self.assertTrue(config.exists())
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(config.parent.stat().st_mode), 0o700)
+
+        runtime_config = root / "Fusion/.davinci_mcp_runtime/bridge.json"
+        self.assertEqual(runtime_config.read_bytes(), config.read_bytes())
+        launcher = (target / "resolve_bridge.py").read_text(encoding="utf-8")
+        encoded = base64.urlsafe_b64encode(str(config).encode("utf-8")).decode("ascii")
+        self.assertIn(encoded, launcher)
+
+    def test_main_prints_the_FIXED_probe_report_path_even_under_an_override(self) -> None:
+        # The probe runs INSIDE Resolve, which never inherits the shell's
+        # DAVINCI_RESOLVE_BRIDGE_CONFIG — it always writes host-model-probe.json
+        # to the fixed default directory. Guidance that followed the override
+        # would point the user at a file that will never exist there.
+        import contextlib
+        import io
+        import pathlib
+        import sys
+        import tempfile
+        from unittest import mock
+
+        config = pathlib.Path(tempfile.mkdtemp(prefix="bridge_main_config_")) / "bridge.json"
+        result = {
+            "installed": [],
+            "probe_only": True,
+            "python": {"resolve_will_list_python_scripts": True, "advice": None},
+            "warnings": [],
+            "skipped": [],
+        }
+        output = io.StringIO()
+        with mock.patch.dict(
+            os.environ, {self.installer.ENV_CONFIG_PATH: str(config)}, clear=True
+        ), mock.patch.object(sys, "argv", ["install_resolve_bridge.py", "--probe-only"]), \
+                mock.patch.object(self.installer, "install", return_value=result), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(self.installer.main(), 0)
+
+        self.assertNotIn(str(config.parent / "host-model-probe.json"), output.getvalue())
+        self.assertIn("~/.config/davinci-resolve-mcp/host-model-probe.json", output.getvalue())
 
     def test_the_sandbox_path_keeps_the_vendor_segment(self) -> None:
         # The decoy drops it; Resolve's documented path does not.
@@ -767,23 +977,43 @@ class InstallerTargetTests(unittest.TestCase):
         self.assertIsNotNone(probe_markers, "probe has no PARENT_MARKERS to compare")
         self.assertEqual(tuple(rb.PARENT_MARKERS), probe_markers)
 
+    def _python3_home_for(self, prefix: str) -> dict:
+        """python3_home_prefix() as if launchd carried this PYTHON3HOME.
+
+        Patches launchd_env rather than the environment: the function reads
+        launchctl on purpose (a shell export is invisible to a GUI-launched
+        Resolve), and a test that went through os.environ would be exercising
+        the one path that does not matter.
+        """
+        from unittest import mock
+
+        with mock.patch.object(self.installer, "launchd_env", lambda name: prefix):
+            return self.installer.python3_home_prefix()
+
     def _darwin_preflight(self, *, frameworks=(), python3_home=None,
-                          shell_home=None, fallback_exists=False):
+                          shell_home=None, fallback_exists=False,
+                          home_usable=True, home_reason="unusable prefix"):
         """python_preflight() on a synthetic macOS machine.
 
         Pinned to darwin explicitly: the check is macOS-only, so on a Linux or
         Windows runner an unpinned version would assert the very false alarm the
         platform gate exists to suppress.
+
+        `home_usable=False` is the issue #182 state: PYTHON3HOME set, and
+        pointing somewhere Resolve cannot actually use.
         """
         import sys as _sys
         from unittest import mock
 
+        usable = python3_home is not None and home_usable
         home = {
             "value": python3_home,
             "in_launchd": python3_home is not None,
             "in_this_shell": shell_home,
             "dylib": f"{python3_home}/lib/libpython3.12.dylib" if python3_home else None,
-            "usable": python3_home is not None,
+            "interpreter": f"{python3_home}/bin/python3" if usable else None,
+            "reason": None if usable or python3_home is None else home_reason,
+            "usable": usable,
         }
         fallback = {
             "path": "/usr/local/bin/python3",
@@ -843,6 +1073,101 @@ class InstallerTargetTests(unittest.TestCase):
         self.assertTrue(preflight["resolve_will_list_python_scripts"])
         self.assertIn("launchd", preflight["advice"])
         self.assertIn("launchctl setenv", preflight["advice"])
+
+    def test_a_dylib_without_bin_python3_is_not_usable(self) -> None:
+        """Issue #182. Resolve does two things with the prefix — runs
+        `<prefix>/bin/python3` and dlopens `<prefix>/lib/libpython3.X.dylib` —
+        and validating only the second reported `usable: true` for a prefix
+        Resolve could not run. The user was told it was configured correctly and
+        then got zero Python scripts and no error, which puts the real cause in
+        the last place anyone looks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            (prefix / "lib").mkdir()
+            (prefix / "lib" / "libpython3.13.dylib").write_bytes(b"")
+            (prefix / "bin").mkdir()
+            # What a Homebrew framework build actually ships: the versioned name
+            # only. Resolve invokes the unversioned one.
+            (prefix / "bin" / "python3.13").write_bytes(b"")
+            home = self._python3_home_for(str(prefix))
+
+        self.assertFalse(home["usable"])
+        self.assertIsNotNone(home["dylib"])
+        self.assertIsNone(home["interpreter"])
+        self.assertIn("python3.13", home["reason"])
+        self.assertIn("UNVERSIONED", home["reason"])
+
+    def test_both_halves_present_is_usable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            (prefix / "lib").mkdir()
+            (prefix / "lib" / "libpython3.13.dylib").write_bytes(b"")
+            (prefix / "bin").mkdir()
+            (prefix / "bin" / "python3").write_bytes(b"")
+            home = self._python3_home_for(str(prefix))
+
+        self.assertTrue(home["usable"])
+        self.assertIsNone(home["reason"])
+
+    def test_an_interpreter_with_no_dylib_is_not_usable_either(self) -> None:
+        """The other half, unchanged in effect but now explained: Resolve embeds
+        the interpreter, so a build with no shared library cannot be used."""
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            (prefix / "bin").mkdir()
+            (prefix / "bin" / "python3").write_bytes(b"")
+            home = self._python3_home_for(str(prefix))
+
+        self.assertFalse(home["usable"])
+        self.assertIn("dlopen", home["reason"])
+
+    def test_a_dangling_bin_python3_symlink_does_not_count(self) -> None:
+        """`.exists()` follows the link, which is the right semantics here: a
+        dangling symlink is exactly as runnable as nothing at all."""
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            (prefix / "lib").mkdir()
+            (prefix / "lib" / "libpython3.13.dylib").write_bytes(b"")
+            (prefix / "bin").mkdir()
+            (prefix / "bin" / "python3").symlink_to(prefix / "bin" / "gone")
+            home = self._python3_home_for(str(prefix))
+
+        self.assertFalse(home["usable"])
+
+    def test_an_unusable_python3home_fails_the_preflight(self) -> None:
+        """The reported symptom: the closing warning must fire instead of a
+        false all-clear."""
+        preflight = self._darwin_preflight(
+            python3_home="/opt/homebrew/opt/python@3.13/Frameworks/"
+                         "Python.framework/Versions/3.13",
+            home_usable=False)
+        self.assertFalse(preflight["resolve_will_list_python_scripts"])
+        self.assertIn("PYTHON3HOME", preflight["advice"])
+
+    def test_an_unusable_python3home_is_called_out_even_when_another_route_works(self) -> None:
+        """PYTHON3HOME is read FIRST, and whether Resolve falls back after
+        choosing a prefix it cannot use is inferred from string adjacency, not
+        established. Staying quiet because /usr/local/bin/python3 happens to
+        exist would rest a clean bill of health on a route Resolve may never
+        reach."""
+        preflight = self._darwin_preflight(
+            python3_home="/broken/prefix", home_usable=False, fallback_exists=True)
+        self.assertIsNotNone(preflight["advice"])
+        self.assertIn("reads PYTHON3HOME first", preflight["advice"])
+        self.assertIn("unsetenv", preflight["advice"])
+
+    def test_the_advice_says_launchctl_setenv_does_not_survive_a_reboot(self) -> None:
+        """Otherwise scripts stop listing weeks later, with the same absence of
+        any error, long after anyone connects it to this step."""
+        preflight = self._darwin_preflight()
+        self.assertIn("reboot", preflight["advice"])
+        self.assertIn("/usr/local/bin/python3", preflight["advice"])
+
+    def test_the_canary_names_the_unversioned_interpreter_requirement(self) -> None:
+        # The canary is what a user reads when nothing else worked; it has to
+        # carry the same trap the preflight now detects.
+        self.assertIn("unversioned", self.installer._LUA_CANARY)
+        self.assertIn("reboot", self.installer._LUA_CANARY)
 
     def test_launchd_env_does_not_read_our_own_environment(self) -> None:
         """The one thing launchd_env must never do. os.environ would report a hit
@@ -2567,3 +2892,147 @@ class BridgePortConflictTests(unittest.TestCase):
         self.assertIn("still running from an earlier Resolve session", message)
         self.assertIn("shutdown", message)
         self.assertIn(str(port), message)
+
+
+class BoundMethodKeywordTests(unittest.TestCase):
+    """Bridge method proxies are positional-only; a kwarg must fail with
+    guidance, not the bare "unexpected keyword argument" that shipped a
+    black-box error to a PR #165 reporter."""
+
+    def test_keyword_argument_raises_with_remediation(self):
+        from src.utils.resolve_bridge_client import _BoundMethod
+
+        method = _BoundMethod(transport=None, handle="h1", name="StartRendering")
+        with self.assertRaises(TypeError) as raised:
+            method([1], isInteractiveMode=False)
+        message = str(raised.exception)
+        self.assertIn("StartRendering", message)
+        self.assertIn("isInteractiveMode", message)
+        self.assertIn("positionally", message)
+
+    def test_no_resolve_api_call_uses_keyword_arguments(self):
+        """PR #165's bug class, guarded for ALL bridge-reachable code.
+
+        The bridge proxies Resolve calls positionally, so a keyword argument
+        on any Resolve API method works on Studio's native scripting and dies
+        on the free edition. The Resolve method-name set comes from the shipped
+        API reference, which is what separates StartRendering from Popen — a
+        PascalCase heuristic alone flags every stdlib constructor in the tree.
+        The first sweep found the bug a second time, in probe_catalogue.py.
+        """
+        import ast
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        api_doc = (root / "docs" / "reference" / "resolve_scripting_api.txt").read_text(encoding="utf-8")
+        api_methods = set(re.findall(r"^\s{2}([A-Z][A-Za-z0-9]+)\(", api_doc, re.M))
+        self.assertGreater(len(api_methods), 100, "API doc parse looks broken")
+
+        offenders = []
+        for path in sorted((root / "src").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    continue
+                if node.func.attr in api_methods and node.keywords:
+                    kw = ", ".join(k.arg or "**" for k in node.keywords)
+                    offenders.append(
+                        f"{path.relative_to(root)}:{node.lineno} "
+                        f"{node.func.attr}({kw}=...)"
+                    )
+        self.assertEqual(
+            offenders, [],
+            "Resolve API calls must be positional — a keyword argument dies in "
+            "the free-edition bridge's _BoundMethod (PR #165). Rewrite these "
+            "positionally:\n  " + "\n  ".join(offenders),
+        )
+
+
+class InstallerGuidanceTests(unittest.TestCase):
+    """What the installer tells the user after it writes the files.
+
+    Issue #219: a user saw two identical `resolve_bridge_canary` entries and no
+    `resolve_bridge_probe`, followed the printed steps to a menu entry that
+    cannot exist, ran the canary, and saw nothing happen. Every part of that
+    was already understood by this code — the duplicate is one canary per
+    Scripts folder, the missing probe is exactly what the canary exists to
+    signal, and the canary reports through `print()` to Workspace > Console.
+    None of it was ever said out loud. These tests pin that it is.
+    """
+
+    @staticmethod
+    def _installer():
+        import importlib.util
+        from pathlib import Path as _Path
+        path = _Path(__file__).resolve().parents[1] / "scripts" / "install_resolve_bridge.py"
+        spec = importlib.util.spec_from_file_location("_install_resolve_bridge", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _result(canaries: int):
+        installed = [f"/target{i}/Scripts/Utility/resolve_bridge_canary.lua"
+                     for i in range(canaries)]
+        installed.append("/target0/Scripts/Utility/resolve_bridge_probe.py")
+        return {"installed": installed}
+
+    def test_the_canary_filename_has_one_definition(self) -> None:
+        """The writer and the counter must not be able to disagree — a guidance
+        line promising entries that are not there is worse than no line."""
+        installer = self._installer()
+        self.assertEqual(installer._CANARY_NAME, "resolve_bridge_canary.lua")
+        source = installer.__file__
+        with open(source, encoding="utf-8") as handle:
+            body = handle.read()
+        self.assertEqual(
+            body.count('"resolve_bridge_canary.lua"'), 1,
+            "the canary filename is written and counted; it gets one definition",
+        )
+
+    def test_duplicate_canaries_are_counted_and_explained(self) -> None:
+        installer = self._installer()
+        self.assertEqual(installer.canary_count(self._result(2)), 2)
+        text = "\n".join(installer.next_steps(self._result(2)))
+        self.assertIn("Expect 2 identical", text)
+        self.assertIn("not a double install", text)
+
+    def test_a_single_canary_gets_no_duplicate_warning(self) -> None:
+        """One entry needs no explanation; saying it anyway is noise that
+        trains people to skip the block that matters."""
+        installer = self._installer()
+        text = "\n".join(installer.next_steps(self._result(1)))
+        self.assertNotIn("identical", text)
+
+    def test_the_canary_only_case_has_guidance_at_all(self) -> None:
+        """The outcome the user actually hit. Step 3 names a menu entry that
+        does not exist in this case, so the block must say the install is fine
+        and stop them re-running it."""
+        installer = self._installer()
+        text = "\n".join(installer.next_steps(self._result(2)))
+        self.assertIn("no 'resolve_bridge_probe'", text)
+        self.assertIn("The install worked. Do not re-run it.", text)
+
+    def test_the_console_is_named_because_the_canary_prints_there(self) -> None:
+        """`print()` from a Lua script lands in Workspace > Console. Without
+        that pointer the canary looks broken, which is what was reported."""
+        installer = self._installer()
+        text = "\n".join(installer.next_steps(self._result(2)))
+        self.assertIn("Workspace > Console", text)
+        self.assertIn("looks", text)
+
+    def test_the_cause_is_split_by_edition_not_asserted_as_python_discovery(self) -> None:
+        """The canary's own text predates Resolve 21.1 and blames Python
+        discovery. On free 21.1 that is wrong — Python scripting moved to
+        Studio (#203) — and would send a user chasing PYTHON3HOME for a cause
+        that cannot apply. The guidance must carry both branches.
+        """
+        installer = self._installer()
+        text = "\n".join(installer.next_steps(self._result(2)))
+        self.assertIn("21.1+ FREE", text)
+        self.assertIn("#203", text)
+        self.assertIn("PYTHON3HOME", text)
+        free = text.index("21.1+ FREE")
+        studio = text.index("Studio, or 21.0.x")
+        self.assertLess(free, studio, "the newer, likelier cause reads first")

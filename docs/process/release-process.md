@@ -73,8 +73,9 @@ venv/bin/python tests/test_import.py
 npm install --package-lock-only --no-audit --no-fund   # re-stage package-lock.json if it moved
 venv/bin/python scripts/audit_api_parity.py
 venv/bin/python scripts/gen_api_limitations.py --check
+venv/bin/python scripts/audit_readwrite_symmetry.py --check
 node scripts/agent-rules/generate.mjs --check
-venv/bin/python -m unittest tests.test_static_undefined_names tests.test_duplicate_definitions tests.test_action_list_drift tests.test_panel_docs_drift tests.test_doc_tool_counts tests.test_agent_rules_drift
+venv/bin/python -m unittest tests.test_static_undefined_names tests.test_duplicate_definitions tests.test_action_list_drift tests.test_panel_docs_drift tests.test_doc_tool_counts tests.test_agent_rules_drift tests.test_release_surface_drift
 node bin/davinci-resolve-mcp.mjs --help
 node bin/davinci-resolve-mcp.mjs --version
 npm pack --dry-run
@@ -87,6 +88,13 @@ lockfile: it asserts both version fields and the root dependency blocks match
 regeneration is in the working tree when the test reads it — that ordering is why
 the check is a regeneration followed by a test, not a `git diff --exit-code`,
 which would fire on the release bump's own legitimate change.
+
+`test_release_surface_drift` is the gate on the version bump itself: it asserts
+the README badge, the `README.zh-CN.md` badge and its `本翻译对应 vX.Y.Z` line, and
+a `CHANGELOG.md` entry all match `package.json`. It was not in this list until
+v3.2.2, and v3.2.1 shipped with a zh-CN badge still reading v3.2.0 as a direct
+result — every other gate passed, because none of them looks at a version
+surface. Run it before tagging, not after.
 
 `test_duplicate_definitions` asserts no module-level name is defined twice under
 `src/`. A second `def foo` silently replaces the first, and in a module the size
@@ -196,7 +204,16 @@ should say that no behavior changed.
    ```
 
 6. Push `main`.
-7. Create and push the annotated tag:
+7. Create and push the annotated tag. **Push one release tag at a time and wait
+   for its `Publish npm package` run to finish before pushing the next.** Runs for
+   tags pushed together execute in parallel, and npm points `latest` at whichever
+   publish finishes *last*: on 2026-09-15 v4.6.0–v4.6.2 pushed in one command
+   finished in the order 4.6.1, 4.6.2, 4.6.0, and `latest` landed on 4.6.0. The
+   workflow's final step now re-points `latest` at the highest published version
+   when it lags, but it is a backstop, not the plan — the trusted-publishing token
+   may not be allowed to edit dist-tags, in which case the fix is
+   `npm dist-tag add davinci-resolve-mcp@X.Y.Z latest` by a logged-in maintainer,
+   or simply the next release's publish, which sets `latest` itself.
 
    ```bash
    git tag -a v2.4.1 -m "v2.4.1"

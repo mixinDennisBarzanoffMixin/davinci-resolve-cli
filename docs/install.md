@@ -88,7 +88,7 @@ The installer can automatically configure any of these clients:
 
 | Client | Config Written To |
 |--------|-------------------|
-| Antigravity (Google) | `~/.gemini/antigravity/mcp_config.json` (all platforms) |
+| Antigravity (Google) | `~/.gemini/config/mcp_config.json`, or `~/.gemini/antigravity/mcp_config.json` if that file already exists (all platforms) |
 | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS); `%APPDATA%\Claude\claude_desktop_config.json` (Windows, see MSIX note below) |
 | Claude Code | `.mcp.json` (project root) |
 | Cursor | `~/.cursor/mcp.json` |
@@ -129,6 +129,7 @@ dvr setup --clients all                        # Configure all clients
 dvr doctor                                     # Dry-run environment/config check
 dvr server                                     # Launch the optional managed MCP server
 dvr control-panel                              # Launch the local control panel
+dvr sync                                       # Refresh the managed install only
 
 python install.py                              # Interactive mode
 python install.py --clients all                # Configure all clients
@@ -144,8 +145,8 @@ The MCP server comes in two modes:
 
 | Mode | File | Tools | Best For |
 |------|------|-------|----------|
-| **Compound** (default) | `src/server.py` | 36 | Most users — fast, clean, low context usage |
-| **Full** | `src/resolve_mcp_server.py` | 353 | Power users who want one tool per API method |
+| **Compound** (default) | `src/server.py` | 37 | Most users — fast, clean, low context usage |
+| **Full** | `src/resolve_mcp_server.py` | 389 | Power users who want one tool per API method |
 
 The compound server's `timeline_item` tool includes dedicated actions for common workflows:
 
@@ -160,7 +161,7 @@ The compound server's `timeline_item` tool includes dedicated actions for common
 
 The installer uses the compound server by default. To use the full server:
 ```bash
-python src/server.py --full    # Launch full 353-tool server
+python src/server.py --full    # Launch full 389-tool server
 # Or point your MCP config directly at src/resolve_mcp_server.py
 ```
 
@@ -237,6 +238,18 @@ environment.
 Network scripting permits remote control of Resolve. Prefer Local mode when
 remote access is unnecessary; otherwise restrict access with host firewall and
 network controls.
+
+The MCP server's own networked transport (`--transport streamable-http` or
+`sse`) binds `127.0.0.1:8000` by default and requires `Authorization: Bearer
+<token>` on every request (`DAVINCI_MCP_TOKEN`, or a generated one). To serve a
+client on another machine, set `DAVINCI_MCP_HOST` to the address to bind and,
+if clients reach the box by a DNS name rather than that address, list the names
+in `DAVINCI_MCP_ALLOWED_HOSTS` (comma-separated). The transport keeps
+DNS-rebinding protection on, pinned to the bind host, loopback, and those
+names; a request whose `Host` header is none of them gets 421. A wildcard bind
+(`0.0.0.0` / `::`) with no names listed turns the Host check off, since a
+client never sends the wildcard as its Host, and the bearer token is then the
+only gate. Restrict a non-loopback bind with a host firewall.
 
 Run the read-only doctor against Network mode explicitly:
 

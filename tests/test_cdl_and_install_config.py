@@ -146,6 +146,13 @@ class InstallConfigTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIn("connect_resolve", captured["script"])
+        self.assertIn("connect_resolve(None)", captured["script"])
+        self.assertLess(
+            captured["script"].index("connect_resolve(None)"),
+            captured["script"].index("import DaVinciResolveScript"),
+        )
+        self.assertIn("native_import_attempted = True", captured["script"])
+        self.assertIn("os._exit(0)", captured["script"])
         self.assertIn(repo_root, captured["script"])
         # RESOLVE_SCRIPT_HOST propagated into the probe env by build_server_env.
         self.assertEqual(captured["env"].get("RESOLVE_SCRIPT_HOST"), "127.0.0.1")
@@ -167,10 +174,30 @@ class InstallConfigTests(unittest.TestCase):
             r"C:\Users\sam\AppData\Local\Programs\Python\Python312",
         )
 
+    def _bootable_tree(self):
+        """An install layout the advanced server can actually boot from.
+
+        build_advanced_entry only registers the managed bin when
+        resolve-advanced/ and its Node deps are both present (issue #179);
+        without them it emits the npx fallback, and these tests would pass
+        while checking the wrong branch.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "src").mkdir()
+        (root / "src" / "server.py").write_text("", encoding="utf-8")
+        adv = root / "resolve-advanced"
+        (adv / "server").mkdir(parents=True)
+        (adv / "server" / "index.mjs").write_text("", encoding="utf-8")
+        (adv / "package.json").write_text('{"dependencies": {"zod": "^3.0.0"}}', encoding="utf-8")
+        (adv / "node_modules" / "zod").mkdir(parents=True)
+        return root / "src" / "server.py"
+
     def test_generate_manual_config_formats_include_env(self):
         standard, vscode_fmt, zed_fmt, opencode_fmt, codex_fmt = install.generate_manual_config(
             Path("/tmp/python"),
-            Path("/tmp/server.py"),
+            self._bootable_tree(),
             "/Resolve/Scripting",
             "/Resolve/fusionscript.so",
         )
@@ -198,13 +225,20 @@ class InstallConfigTests(unittest.TestCase):
         # The advanced (Node) server pins AAF_PROBE_PYTHON to the venv interpreter so the
         # offline AAF reader (pyaaf2, installed into that venv) works out of the box.
         advanced = standard_json["mcpServers"]["davinci-resolve-advanced"]
-        self.assertEqual(advanced["command"], "node")
+        # The command is version-resolved at install time: an ABSOLUTE Node
+        # >= the floor when one exists, else bare "node" (a bare command in a
+        # client config resolves against the launching GUI app's PATH, which
+        # is how an nvm v18 ended up running a floor-20.9 server — measured).
+        self.assertTrue(
+            advanced["command"] == "node" or advanced["command"].endswith("/node"),
+            advanced["command"],
+        )
         self.assertEqual(advanced["env"]["AAF_PROBE_PYTHON"], "/tmp/python")
 
     def test_advanced_entry_omits_env_without_python_path(self):
         # No interpreter known → no AAF_PROBE_PYTHON pin (falls back to `python3` on PATH).
-        entry = install.build_advanced_entry(Path("/tmp/server.py"))
-        self.assertEqual(entry["command"], "node")
+        entry = install.build_advanced_entry(self._bootable_tree())
+        self.assertTrue(entry["command"] == "node" or entry["command"].endswith("/node"), entry["command"])
         self.assertNotIn("env", entry)
 
     def test_build_opencode_entry_uses_opencode_schema(self):
@@ -373,7 +407,7 @@ class InstallConfigTests(unittest.TestCase):
         self.assertEqual(run_mock.call_args.kwargs["env"]["PYTHONPATH"], "modules")
 
     def test_windows_stdio_helper_disables_newline_translation(self):
-        source = (PROJECT_ROOT / "src" / "utils" / "mcp_stdio.py").read_text()
+        source = (PROJECT_ROOT / "src" / "utils" / "mcp_stdio.py").read_text(encoding="utf-8")
         self.assertIn('newline=""', source)
 
 
@@ -469,12 +503,12 @@ class ConfigMergeTests(unittest.TestCase):
                 '  "theme": "One Dark",\n'
                 '  "terminal": { "env": { "PATH": "/custom/bin:$PATH" } },\n'
                 "}\n"
-            )
+            , encoding="utf-8")
 
             success, _ = self._write_config(config_path)
             self.assertTrue(success)
 
-            result = json.loads(config_path.read_text())
+            result = json.loads(config_path.read_text(encoding="utf-8"))
             # Existing keys survive the merge.
             self.assertEqual(result["theme"], "One Dark")
             self.assertEqual(result["terminal"]["env"]["PATH"], "/custom/bin:$PATH")
@@ -486,12 +520,12 @@ class ConfigMergeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "settings.json"
-            config_path.write_text(json.dumps({"theme": "Ayu", "lsp": {"x": 1}}))
+            config_path.write_text(json.dumps({"theme": "Ayu", "lsp": {"x": 1}}), encoding="utf-8")
 
             success, _ = self._write_config(config_path)
             self.assertTrue(success)
 
-            result = json.loads(config_path.read_text())
+            result = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(result["theme"], "Ayu")
             self.assertEqual(result["lsp"], {"x": 1})
             self.assertIn("davinci-resolve", result["context_servers"])
@@ -502,14 +536,14 @@ class ConfigMergeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "settings.json"
             garbage = '{ "theme": "One Dark" this is not valid json at all '
-            config_path.write_text(garbage)
+            config_path.write_text(garbage, encoding="utf-8")
 
             success, message = self._write_config(config_path)
 
             self.assertFalse(success)
             self.assertIn("could not be parsed", message)
             # The original file must be left untouched.
-            self.assertEqual(config_path.read_text(), garbage)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), garbage)
 
     def test_missing_file_is_created(self):
         import tempfile
@@ -520,7 +554,7 @@ class ConfigMergeTests(unittest.TestCase):
             success, _ = self._write_config(config_path)
             self.assertTrue(success)
 
-            result = json.loads(config_path.read_text())
+            result = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertIn("davinci-resolve", result["context_servers"])
 
     def test_opencode_config_merges_with_opencode_schema(self):
@@ -543,7 +577,7 @@ class ConfigMergeTests(unittest.TestCase):
                         "mcp": {"other-server": {"type": "local", "enabled": True}},
                     }
                 )
-            )
+            , encoding="utf-8")
             opencode_client["get_path"] = lambda: config_path
 
             success, _ = install.write_client_config(
@@ -555,7 +589,7 @@ class ConfigMergeTests(unittest.TestCase):
             )
             self.assertTrue(success)
 
-            result = json.loads(config_path.read_text())
+            result = json.loads(config_path.read_text(encoding="utf-8"))
             # Existing keys and sibling servers survive the merge.
             self.assertEqual(result["theme"], "tokyonight")
             self.assertIn("other-server", result["mcp"])
@@ -592,7 +626,7 @@ class ConfigMergeTests(unittest.TestCase):
             success, message = self._write_codex(config_path)
             self.assertTrue(success, message)
 
-            entry = _parse_toml(config_path.read_text())["mcp_servers"]["davinci-resolve"]
+            entry = _parse_toml(config_path.read_text(encoding="utf-8"))["mcp_servers"]["davinci-resolve"]
             self.assertEqual(entry["command"], "/tmp/python")
             self.assertEqual(entry["args"], ["/tmp/server.py"])
 
@@ -607,12 +641,12 @@ class ConfigMergeTests(unittest.TestCase):
                 "[mcp_servers.other]\n"
                 'command = "npx"\n'
                 'args = ["-y", "other-mcp"]\n'
-            )
+            , encoding="utf-8")
 
             success, message = self._write_codex(config_path)
             self.assertTrue(success, message)
 
-            text = config_path.read_text()
+            text = config_path.read_text(encoding="utf-8")
             parsed = _parse_toml(text)
             self.assertEqual(parsed["model"], "gpt-5-codex")
             self.assertEqual(parsed["approval_policy"], "on-request")
@@ -635,12 +669,12 @@ class ConfigMergeTests(unittest.TestCase):
                 "\n"
                 "[mcp_servers.other]\n"
                 'command = "npx"\n'
-            )
+            , encoding="utf-8")
 
             success, message = self._write_codex(config_path)
             self.assertTrue(success, message)
 
-            text = config_path.read_text()
+            text = config_path.read_text(encoding="utf-8")
             parsed = _parse_toml(text)
             self.assertEqual(
                 parsed["mcp_servers"]["davinci-resolve"]["command"], "/tmp/python"
@@ -650,7 +684,7 @@ class ConfigMergeTests(unittest.TestCase):
             self.assertEqual(parsed["mcp_servers"]["other"]["command"], "npx")
             # Rewriting twice is idempotent — no duplicate table.
             self._write_codex(config_path)
-            self.assertEqual(config_path.read_text().count("[mcp_servers.davinci-resolve]"), 1)
+            self.assertEqual(config_path.read_text(encoding="utf-8").count("[mcp_servers.davinci-resolve]"), 1)
 
     def test_codex_invalid_toml_is_not_overwritten(self):
         if install._toml_loader() is None:
@@ -658,13 +692,13 @@ class ConfigMergeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             garbage = 'model = "gpt-5-codex\n[oops\n'
-            config_path.write_text(garbage)
+            config_path.write_text(garbage, encoding="utf-8")
 
             success, message = self._write_codex(config_path)
 
             self.assertFalse(success)
             self.assertIn("not valid TOML", message)
-            self.assertEqual(config_path.read_text(), garbage)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), garbage)
 
     def test_codex_inline_definition_is_refused_not_duplicated(self):
         # An inline `davinci-resolve = { ... }` cannot be spliced line-by-line;
@@ -676,13 +710,13 @@ class ConfigMergeTests(unittest.TestCase):
                 "[mcp_servers]\n"
                 'davinci-resolve = { command = "/old/python", args = ["/old/server.py"] }\n'
             )
-            config_path.write_text(original)
+            config_path.write_text(original, encoding="utf-8")
 
             success, message = self._write_codex(config_path)
 
             self.assertFalse(success)
             self.assertIn("manually", message)
-            self.assertEqual(config_path.read_text(), original)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
 
     def test_codex_merge_preserves_per_tool_subtables(self):
         # A hand-written Codex config puts per-tool approval modes in
@@ -703,12 +737,12 @@ class ConfigMergeTests(unittest.TestCase):
                 "\n"
                 "[mcp_servers.other]\n"
                 'command = "npx"\n'
-            )
+            , encoding="utf-8")
 
             success, message = self._write_codex(config_path)
             self.assertTrue(success, message)
 
-            text = config_path.read_text()
+            text = config_path.read_text(encoding="utf-8")
             entry = _parse_toml(text)["mcp_servers"]["davinci-resolve"]
             self.assertEqual(entry["command"], "/tmp/python")
             self.assertEqual(entry["tools"]["timeline"]["approval_mode"], "approve")
@@ -735,12 +769,12 @@ class ConfigMergeTests(unittest.TestCase):
                 '  "/old/server.py",\n'
                 "]\n"
                 "tool_timeout_sec = 90\n"
-            )
+            , encoding="utf-8")
 
             success, message = self._write_codex(config_path)
             self.assertTrue(success, message)
 
-            text = config_path.read_text()
+            text = config_path.read_text(encoding="utf-8")
             entry = _parse_toml(text)["mcp_servers"]["davinci-resolve"]
             self.assertEqual(entry["command"], "/tmp/python")
             self.assertEqual(entry["args"], ["/tmp/server.py"])
@@ -762,12 +796,12 @@ class ConfigMergeTests(unittest.TestCase):
                 "\n"
                 "[mcp_servers.davinci-resolve.tools.timeline]\n"
                 'approval_mode = "approve"\n'
-            )
+            , encoding="utf-8")
 
             self._write_codex(config_path)
-            once = config_path.read_text()
+            once = config_path.read_text(encoding="utf-8")
             self._write_codex(config_path)
-            self.assertEqual(config_path.read_text(), once)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), once)
 
     def test_codex_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -836,6 +870,62 @@ class PythonVersionGateTests(unittest.TestCase):
         with patch.object(install, "_version_for_python", return_value=(3, 9, 0)):
             with self.assertRaises(SystemExit):
                 install.require_supported_python("/usr/bin/python3.9")
+
+
+class AntigravityConfigPathTests(unittest.TestCase):
+    """Issue #159 — two contributors report two paths; resolve by what exists."""
+
+    def _resolve(self, existing):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_home = Path(tmp)
+            for rel in existing:
+                target = fake_home / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("{}\n", encoding="utf-8")
+            with patch.object(install, "home", return_value=fake_home):
+                resolved = install.antigravity_config()
+            return resolved.relative_to(fake_home).as_posix()
+
+    def test_falls_back_to_gemini_config_when_neither_exists(self):
+        self.assertEqual(self._resolve([]), ".gemini/config/mcp_config.json")
+
+    def test_uses_the_antigravity_path_when_only_it_exists(self):
+        self.assertEqual(
+            self._resolve([".gemini/antigravity/mcp_config.json"]),
+            ".gemini/antigravity/mcp_config.json",
+        )
+
+    def test_uses_the_config_path_when_only_it_exists(self):
+        self.assertEqual(
+            self._resolve([".gemini/config/mcp_config.json"]),
+            ".gemini/config/mcp_config.json",
+        )
+
+    def test_config_path_wins_when_both_exist(self):
+        """The installer never wrote ~/.gemini/config/, so its presence is evidence."""
+        self.assertEqual(
+            self._resolve([
+                ".gemini/config/mcp_config.json",
+                ".gemini/antigravity/mcp_config.json",
+            ]),
+            ".gemini/config/mcp_config.json",
+        )
+
+    def test_a_bare_antigravity_directory_is_not_taken_as_a_config(self):
+        """~/.gemini/antigravity/ holds runtime state on every install (#159)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_home = Path(tmp)
+            (fake_home / ".gemini" / "antigravity" / "logs").mkdir(parents=True)
+            with patch.object(install, "home", return_value=fake_home):
+                resolved = install.antigravity_config()
+        self.assertEqual(
+            resolved.relative_to(fake_home).as_posix(),
+            ".gemini/config/mcp_config.json",
+        )
+
+    def test_client_entry_uses_the_resolver(self):
+        entry = next(c for c in install.MCP_CLIENTS if c["id"] == "antigravity")
+        self.assertIs(entry["get_path"], install.antigravity_config)
 
 
 if __name__ == "__main__":

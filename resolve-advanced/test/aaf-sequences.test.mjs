@@ -225,7 +225,7 @@ test('list_sequences drt → enumerates authored timelines', async () => {
 test('list_sequences drp → enumerates the template project', async () => {
   const r = await drtTool.handler({ action: 'list_sequences', args: { drpPath: 'vendor/drp-format/templates/media-clip-h264.drp' } });
   assert.ok(r.count >= 1);
-  assert.equal(r.sequences[0].name, 'sample.mp4');
+  assert.equal(r.sequences[0].name, 'MediaTemplate');  // E127: the pool's timeline name, not the first clip's (was the fallback 'sample.mp4')
   assert.ok(typeof r.sequences[0].id === 'string' && r.sequences[0].id.length);
 });
 
@@ -491,6 +491,30 @@ print(json.dumps(state))
   assert.deepEqual(out.unhandled, {});
 });
 
+test('aaf_probe: a 0% motion effect is a FREEZE, not "nothing recoverable" (E104)', { skip: PY ? false : 'python3 not available' }, () => {
+  // Avid freeze frames arrive as a motion effect at 0% — PARAM_SPEED_RATIO_U 0.0
+  // or a flat speed map at 0. Both used to fall through the "no play rate"
+  // branch and reach consumers as a plain 100% clip.
+  const out = runWalker(`
+fz1 = opgroup("Motion Control", 48, [mk("Sequence", components=[clip("A001", 1, start=10)])])
+fz1.parameters = [mk("ConstantValue", name="PARAM_SPEED_RATIO_U", value=0.0)]
+fz2 = opgroup("Motion Control", 24, [mk("Sequence", components=[clip("A002", 1)])])
+fz2.parameters = [mk("VaryingValue", name="PARAM_SPEED_MAP_U", pointlist=[mk("ControlPoint", time=0.0, value=0.0), mk("ControlPoint", time=1.0, value=0.0)])]
+seq = mk("Sequence", components=[fz1, fz2, clip("B001", 25)])
+state = new_state()
+ap._walk_slot(seq, prefix="V", fps=24, state=state)
+print(json.dumps(state))
+`);
+  assert.deepEqual(
+    out.events.map((e) => [e.source, e.recIn, e.recOut, e.speed, e.freeze === true]),
+    [
+      ['A001', 0, 48, 0, true],
+      ['A002', 48, 72, 0, true],
+      ['B001', 72, 97, 100, false],
+    ],
+  );
+});
+
 test('aaf_probe: variable-speed timewarp → speedVarying, never a fabricated number', { skip: PY ? false : 'python3 not available' }, () => {
   const out = runWalker(`
 from fractions import Fraction
@@ -608,7 +632,7 @@ print(json.dumps({"events": state["events"], "walked": walked}))
   // The declared-length cross-check: 100 + 50 + 30 - 20.
   assert.equal(out.walked, 160, 'sequence length == sum(components) - sum(transitions)');
   // The clip AFTER the transition is still the one annotated with it.
-  assert.deepEqual(out.events[1].transition, { type: 'dissolve', duration: 20 });
+  assert.deepEqual(out.events[1].transition, { type: 'dissolve', duration: 20, alignment: 'start' });
   assert.equal(out.events[0].transition, null);
   assert.equal(out.events[2].transition, null);
 });
@@ -640,9 +664,11 @@ print(json.dumps(state))
   );
 });
 
-test('aaf_probe: a transition at the head clamps instead of going negative', { skip: PY ? false : 'python3 not available' }, () => {
-  // A leading transition has no preceding material to overlap. Malformed, but a
-  // negative record position would be a worse lie than the file that produced it.
+test('aaf_probe: a transition at the head clamps — and is a fade-in from black (E93)', { skip: PY ? false : 'python3 not available' }, () => {
+  // A leading transition has no preceding material to overlap: the rewind
+  // clamps at the sequence start, and since the sequence head counts as
+  // black, a zero-length BL pseudo-event materializes the fade-in side for
+  // the bridge's black machinery.
   const out = runWalker(`
 seq = mk("Sequence", components=[mk("Transition", length=25), clip("A001", 50), clip("A002", 10)])
 state = new_state()
@@ -652,12 +678,14 @@ print(json.dumps({"events": state["events"], "walked": walked}))
   assert.deepEqual(
     out.events.map((e) => [e.source, e.recIn, e.recOut]),
     [
+      ['BL', 0, 0],
       ['A001', 0, 50],
       ['A002', 50, 60],
     ],
   );
   assert.equal(out.walked, 60, 'the clamp does not let the rewind escape the sequence start');
-  assert.deepEqual(out.events[0].transition, { type: 'dissolve', duration: 25 });
+  assert.equal(out.events[0].transition, null);
+  assert.deepEqual(out.events[1].transition, { type: 'dissolve', duration: 25, alignment: 'start' });
 });
 
 test('aaf_probe: back-to-back clips are unaffected by the subtraction', { skip: PY ? false : 'python3 not available' }, () => {
@@ -1298,4 +1326,54 @@ ap._walk_slot(mk("Sequence", components=[outer]), prefix="V", fps=24, state=stat
 print(json.dumps(state))
 `);
   assert.deepEqual(out.effectsWithoutEvents, { SubCap: 1 }, 'the innermost cause, once');
+});
+
+// Regression: assemble_from_interchange format 'aaf' used to fall through to
+// the sync parseInterchange, which THROWS for aaf — the tool-layer AAF route
+// never worked before v2.126.0 (every earlier proof called parseAAF directly).
+test('assemble_from_interchange aaf routes through the async parser (stubbed)', async () => {
+  // Single-source events (the multi-source path needs captured templates,
+  // which is not what this regression is about).
+  const ONE_SEQ = {
+    sequences: [{ id: 'urn:mob:9', name: 'ONE', eventCount: 2, events: [
+      { index: 1, track: 'V', source: 'A001', srcIn: 0, srcOut: 48, recIn: 0, recOut: 48, speed: 100, reverse: false, transition: null, fps: 24 },
+      { index: 2, track: 'V', source: 'A001', srcIn: 96, srcOut: 120, recIn: 48, recOut: 72, speed: 100, reverse: false, transition: null, fps: 24 },
+    ] }],
+  };
+  const stubOne = writeStub('py_one.sh', `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify(ONE_SEQ)}\nJSON\n`);
+  process.env.AAF_PROBE_PYTHON = stubOne;
+  const { drtTool } = await import('../server/lib.mjs');
+  const out = path.join(TMP, 'aaf-route.drt');
+  const r = await drtTool.handler({ action: 'assemble_from_interchange', args: {
+    format: 'aaf', path: FAKE_AAF, outputPath: out, targetAppVersion: '19.1.3',
+    sourceMap: {
+      A001: { mediaFilePath: '/m/a.mp4', spec: { width: 640, height: 360, frameCount: 480, fps: 24 } },
+    },
+  }});
+  assert.ok(!r.error, r.error);
+  assert.equal(r.conform.videoEvents, 2);
+  assert.ok(fs.existsSync(out));
+  fs.rmSync(out, { force: true });
+});
+
+test('assemble_from_interchange picks a sequence by name from a multi-seq AAF', async () => {
+  process.env.AAF_PROBE_PYTHON = STUB_OK; // EP012 CONFORM (2 events) + EP012 BONUS (0)
+  const { drtTool } = await import('../server/lib.mjs');
+  const out = path.join(TMP, 'aaf-pick.drt');
+  const mkArgs = (extra) => ({ action: 'assemble_from_interchange', args: {
+    format: 'aaf', path: FAKE_AAF, outputPath: out, targetAppVersion: '19.1.3',
+    sourceMap: {
+      A001: { mediaFilePath: '/m/a.mp4', spec: { width: 640, height: 360, frameCount: 480, fps: 24 } },
+      B002: { mediaFilePath: '/m/a.mp4', spec: { width: 640, height: 360, frameCount: 480, fps: 24 } },
+    }, ...extra,
+  }});
+  // only ONE sequence has events → auto-picks it, no flag needed
+  const r1 = await drtTool.handler(mkArgs({}));
+  assert.ok(!r1.error, r1.error);
+  assert.equal(r1.conform.videoEvents, 2);
+  // explicit name works too; a wrong name names the available ones
+  const r2 = await drtTool.handler(mkArgs({ sequenceName: 'EP012 CONFORM' }));
+  assert.ok(!r2.error, r2.error);
+  await assert.rejects(drtTool.handler(mkArgs({ sequenceName: 'NOPE' })), /available: EP012 CONFORM, EP012 BONUS/);
+  fs.rmSync(out, { force: true });
 });

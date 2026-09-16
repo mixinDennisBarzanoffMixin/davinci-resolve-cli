@@ -107,6 +107,7 @@ autoresearch/
 docs/_scratch/
 docs/_design/
 **/*gameplan*.md
+docs/superpowers/specs/
 **/*ledger*.json
 **/*review-log*.md
 **/*session*.md
@@ -132,3 +133,6 @@ davinci-resolve-mcp-analysis/
 # capture script, and one-off repro scripts. Never shipped. See local/README.md.
 /local/
 .claude/launch.json
+
+# CI managed-install handshake probe output
+handshake.jsonl

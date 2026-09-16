@@ -27,7 +27,7 @@ EXIT_USAGE = 2
 EXIT_INTERNAL = 3
 EXIT_INTERRUPTED = 130
 
-VERSION = "2.103.2"
+VERSION = "4.7.6"
 SURFACES = ("compound", "granular")
 OUTPUTS = ("json", "jsonl", "raw", "shell")
 

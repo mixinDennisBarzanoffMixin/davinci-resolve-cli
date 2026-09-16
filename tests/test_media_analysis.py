@@ -22,6 +22,7 @@ from src.server import (
     _media_analysis_effective_preferences,
     _media_analysis_merge_metadata_field,
     _media_analysis_marker_candidates_from_report,
+    _media_analysis_plan_project_root,
     _media_analysis_metadata_writeback_enabled,
     _media_analysis_missing_capabilities_response,
     _media_analysis_publish_confirmed,
@@ -1301,7 +1302,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
                 "clip_analysis_markers": {"markers": [], "marker_count": 0},
             }
             report_path = os.path.join(clip_dir, "analysis.json")
-            with open(report_path, "w") as handle:
+            with open(report_path, "w", encoding="utf-8") as handle:
                 json.dump(report, handle)
 
             clip = _PublishClipStub("clip-pub-1", "demo.mp4", media_file)
@@ -1388,7 +1389,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
                     ],
                 },
             }
-            with open(os.path.join(clip_dir, "analysis.json"), "w") as h:
+            with open(os.path.join(clip_dir, "analysis.json"), "w", encoding="utf-8") as h:
                 json.dump(report, h)
             jpeg = b"\xff\xd8\xff\xd9"
             with open(os.path.join(clip_dir, "frames", "sampled_0001.jpg"), "wb") as h:
@@ -4072,6 +4073,243 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             self.assertEqual(index["counts"]["clips"], 2)
             self.assertGreaterEqual(search["result_count"], 1)
 
+    def test_batch_job_slice_reports_whisper_timeout_as_failed_clip(self):
+        """A wall-clock transcription timeout must not count as a succeeded clip."""
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg/ffprobe not installed")
+        timeout_payload = {
+            "success": False,
+            "status": "wall_clock_timeout",
+            "backend": "whisper_cli",
+            "reason": "wall-clock timeout after 90s",
+            "elapsed_ms": 90000,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = os.path.join(tmp, "source")
+            analysis_dir = os.path.join(tmp, "analysis")
+            os.makedirs(source_dir)
+            source = os.path.join(source_dir, "job_timeout.mp4")
+            self._write_synthetic_media(source)
+            records = [{
+                "clip_id": "clip-timeout",
+                "clip_name": "job_timeout.mp4",
+                "file_path": source,
+                "media_id": "media-timeout",
+            }]
+            params = {
+                "analysis_root": analysis_dir,
+                "depth": "quick",
+                "transcription": {"enabled": True, "backend": "mock"},
+                "vision": {"enabled": False},
+            }
+            created = create_batch_job(
+                project_name="Example Project",
+                project_id="project-job-timeout",
+                records=records,
+                target={"type": "file_list"},
+                params=params,
+                name="Timeout batch",
+            )
+            self.assertTrue(created["success"])
+            job = created["job"]
+            captured = {}
+            real_execute_plan = execute_plan
+
+            def _capture_execute_plan(*args, **kwargs):
+                manifest = real_execute_plan(*args, **kwargs)
+                captured["manifest"] = manifest
+                return manifest
+
+            with unittest.mock.patch.object(
+                _media_analysis_module, "_transcribe", return_value=timeout_payload
+            ), unittest.mock.patch(
+                "src.utils.media_analysis_jobs.execute_plan",
+                side_effect=_capture_execute_plan,
+            ):
+                slice_result = run_batch_job_slice(job["project_root"], job["job_id"], max_clips=1)
+
+            self.assertIn("manifest", captured)
+            clip_result = (captured["manifest"].get("clips") or [{}])[0]
+            self.assertFalse(
+                clip_result.get("success"),
+                "transcription timeout must not mark clip_result.success True",
+            )
+            self.assertEqual((slice_result.get("processed") or [{}])[0].get("status"), "failed")
+            final = batch_job_status(job["project_root"], job["job_id"])
+            self.assertEqual(final["failed_clips"], 1)
+            self.assertEqual(final["succeeded_clips"], 0)
+            self.assertTrue(final.get("last_error"), "job last_error must be set on transcription timeout")
+            self.assertNotEqual(final["status"], "completed")
+
+    def test_declined_transcription_does_not_poison_cache_reuse(self):
+        """A skipped transcript is a missing layer only if a re-run could fix it.
+
+        Transcription is enabled by default and allow_model_download is not, so
+        a stock install writes a declined "skipped" transcript into every
+        report. Counting that as a missing layer made every cached report
+        reusable=False forever — full re-analysis on every call that could
+        never produce the transcript either.
+        """
+        from src.utils.media_analysis import _report_missing_layers
+
+        base_report = {"technical": {"ok": True}, "clip_analysis_markers": [{"m": 1}]}
+        declined = {
+            "success": False, "status": "skipped", "backend": "whisper_cli",
+            "reason": "Local transcription may download model files; set allow_model_download=true explicitly to run it.",
+        }
+        cases = [
+            # (name, cached transcript, transcription options, expect_missing)
+            ("declined skip, no opt-in: report is as complete as a re-run",
+             declined, {"enabled": True, "backend": "whisper_cli"}, False),
+            ("declined skip, opted in now: re-run would transcribe",
+             declined, {"enabled": True, "backend": "whisper_cli", "allow_model_download": True}, True),
+            ("declined skip, mock backend always attempts",
+             declined, {"enabled": True, "backend": "mock"}, True),
+            ("wall-clock timeout is a real attempt; retry may fix it",
+             {"success": False, "status": "wall_clock_timeout", "reason": "90s"},
+             {"enabled": True, "backend": "whisper_cli"}, True),
+            ("caps refusal is a real attempt",
+             {"success": False, "status": "caps_exhausted", "reason": "cap"},
+             {"enabled": True, "backend": "whisper_cli"}, True),
+            ("no transcript key at all (old report)",
+             None, {"enabled": True, "backend": "whisper_cli"}, True),
+            ("real transcript satisfies the layer",
+             {"success": True, "backend": "whisper_cli", "segments": [{"text": "hi"}]},
+             {"enabled": True, "backend": "whisper_cli", "allow_model_download": True}, False),
+            ("disabled-run cache, request still not opting in",
+             {"success": True, "status": "skipped", "reason": "transcription disabled"},
+             {"enabled": True, "backend": "whisper_cli"}, False),
+            ("disabled-run cache, request now opting in",
+             {"success": True, "status": "skipped", "reason": "transcription disabled"},
+             {"enabled": True, "backend": "whisper_cli", "allow_model_download": True}, True),
+            ("whisper_cpp never attempts (not_implemented), even opted in",
+             declined, {"enabled": True, "backend": "whisper_cpp", "allow_model_download": True}, False),
+            ("transcription disabled: never missing",
+             declined, {"enabled": False}, False),
+        ]
+        for name, transcript, transcription, expect_missing in cases:
+            with self.subTest(case=name):
+                report = dict(base_report)
+                if transcript is not None:
+                    report["transcription"] = transcript
+                missing = _report_missing_layers(report, "quick", {"transcription": transcription})
+                if expect_missing:
+                    self.assertIn("transcription", missing)
+                else:
+                    self.assertNotIn("transcription", missing)
+
+    def _run_single_clip_batch_with_transcript(self, tmp, payload):
+        """Run a one-clip batch whose _transcribe returns `payload`.
+
+        These tests mock what `_transcribe` *returns*, but the job still has to
+        be created first, and create_batch_job refuses a job whose enabled
+        transcription has no backend behind it
+        (`missing_required_capabilities`). So a machine with no Whisper backend
+        cannot reach the behaviour under test — including, awkwardly, the case
+        named for an unavailable backend, which is about how a *result* is
+        counted rather than how the job is gated.
+        """
+        if not _media_analysis_module.detect_capabilities().get(
+                "transcription", {}).get("available"):
+            self.skipTest("no local transcription backend installed")
+        source_dir = os.path.join(tmp, "source")
+        os.makedirs(source_dir)
+        source = os.path.join(source_dir, "job_transcript.mp4")
+        self._write_synthetic_media(source)
+        created = create_batch_job(
+            project_name="Example Project",
+            project_id="project-job-transcript",
+            records=[{
+                "clip_id": "clip-transcript",
+                "clip_name": "job_transcript.mp4",
+                "file_path": source,
+                "media_id": "media-transcript",
+            }],
+            target={"type": "file_list"},
+            params={
+                "analysis_root": os.path.join(tmp, "analysis"),
+                "depth": "quick",
+                "transcription": {"enabled": True},
+                "vision": {"enabled": False},
+            },
+            name="Transcript batch",
+        )
+        # Carry the payload into the message: a bare "False is not true" from a
+        # helper four call-frames deep says nothing about which precondition
+        # failed, and this one only runs where ffmpeg exists.
+        self.assertTrue(created["success"], created)
+        job = created["job"]
+        with unittest.mock.patch.object(
+            _media_analysis_module, "_transcribe", return_value=payload
+        ):
+            run_batch_job_slice(job["project_root"], job["job_id"], max_clips=1)
+        return batch_job_status(job["project_root"], job["job_id"])
+
+    def test_unavailable_transcription_backend_does_not_fail_the_clip(self):
+        """An install with no Whisper backend must not fail every batch clip.
+
+        Transcription is enabled by default and allow_model_download is off by
+        default, so _transcribe returns success False / status "skipped" on a
+        stock install. Counting that as a clip failure would fail every clip of
+        every batch for most users.
+        """
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg/ffprobe not installed")
+        for reason, payload in (
+            ("no backend available", {
+                "success": False,
+                "status": "skipped",
+                "reason": "No local transcription backend available",
+            }),
+            ("model download not opted into", {
+                "success": False,
+                "status": "skipped",
+                "backend": "whisper_cli",
+                "reason": "Local transcription may download model files; set allow_model_download=true explicitly to run it.",
+            }),
+            ("backend not implemented", {
+                "success": False,
+                "status": "not_implemented",
+                "backend": "whisper_cpp",
+                "reason": "whisper_cpp execution needs per-install CLI validation before enabling.",
+            }),
+        ):
+            with self.subTest(reason=reason):
+                with tempfile.TemporaryDirectory() as tmp:
+                    final = self._run_single_clip_batch_with_transcript(tmp, payload)
+                self.assertEqual(final["succeeded_clips"], 1)
+                self.assertEqual(final["failed_clips"], 0)
+                self.assertEqual(final["status"], "completed")
+                self.assertFalse(final.get("last_error"))
+
+    def test_transcription_backend_error_still_fails_the_clip(self):
+        """A backend that ran and broke is a real failure, status or not."""
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg/ffprobe not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            final = self._run_single_clip_batch_with_transcript(tmp, {
+                "success": False,
+                "backend": "whisper_cli",
+                "error": "whisper exited 1",
+            })
+        self.assertEqual(final["failed_clips"], 1)
+        self.assertEqual(final["succeeded_clips"], 0)
+        self.assertTrue(final.get("last_error"))
+
+    def test_caps_refusal_still_fails_the_clip(self):
+        """A caps refusal is a deliberate stop the caller has to be told about."""
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg/ffprobe not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            final = self._run_single_clip_batch_with_transcript(tmp, {
+                "success": False,
+                "status": "caps_exhausted",
+                "reason": "daily vision-token cap reached",
+            })
+        self.assertEqual(final["failed_clips"], 1)
+        self.assertEqual(final["succeeded_clips"], 0)
+        self.assertTrue(final.get("last_error"))
+
     def test_batch_job_cancel_and_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             source_dir = os.path.join(tmp, "source")
@@ -4096,6 +4334,84 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             resumed = resume_batch_job(job["project_root"], job["job_id"])
             self.assertEqual(resumed["status"], "queued")
             self.assertEqual(resumed["pending_clips"], 1)
+
+
+class CleanupArtifactsTests(unittest.TestCase):
+    """cleanup_artifacts(frames_only=False) deletes the whole analysis root, so it
+    has to let go of the cached timeline-brain connection on that root first."""
+
+    def _log_one_edit(self, project_root, run_id):
+        from src.utils import timeline_brain_db
+
+        with timeline_brain_db.transaction(project_root) as conn:
+            conn.execute(
+                "INSERT INTO brain_edits(analysis_run_id, edit_type, created_at)"
+                " VALUES (?, ?, ?)",
+                (run_id, "silence_ripple", "2026-01-01T00:00:00Z"),
+            )
+
+    def test_full_cleanup_releases_the_timeline_brain_connection(self):
+        from src.utils import timeline_brain_db
+
+        self.addCleanup(timeline_brain_db.close_all)
+        tmp = tempfile.mkdtemp(prefix="cleanup_artifacts_test_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        project_root = os.path.join(tmp, "project-analysis")
+        os.makedirs(project_root)
+        db_path = timeline_brain_db.db_path_for_project(project_root)
+        self._log_one_edit(project_root, "run-before-cleanup")
+        self.assertTrue(os.path.isfile(db_path))
+
+        result = cleanup_artifacts(project_root, frames_only=False)
+        self.assertTrue(result["success"], result)
+        # On Windows the still-open handle makes rmtree skip the DB file, and
+        # ignore_errors=True hides it: the root survives while we report it gone.
+        self.assertFalse(
+            os.path.isdir(project_root),
+            msg=f"analysis root still on disk after cleanup: {project_root}",
+        )
+
+        # And the cached handle must be dropped, or the next write for this root
+        # goes to the deleted file and never reaches disk.
+        self._log_one_edit(project_root, "run-after-cleanup")
+        self.assertTrue(os.path.isfile(db_path), msg=f"write went nowhere: {db_path}")
+        probe = sqlite3.connect(db_path)
+        try:
+            rows = probe.execute(
+                "SELECT analysis_run_id FROM brain_edits"
+            ).fetchall()
+        finally:
+            probe.close()
+        self.assertEqual([r[0] for r in rows], ["run-after-cleanup"])
+
+    def test_session_only_cleanup_releases_the_timeline_brain_connection(self):
+        """The same rule at the second site: a session-only run ingests reports
+        into <output_root>/_soul/timeline_brain.sqlite and then deletes that
+        root, so it has to drop the cached connection too. Each run gets a
+        fresh temp root, so a leak here accumulates across runs."""
+        from src.utils import timeline_brain_db
+
+        self.addCleanup(timeline_brain_db.close_all)
+        tmp = tempfile.mkdtemp(prefix="session_only_cleanup_test_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        output_root = os.path.join(tmp, "davinci-resolve-mcp-analysis-session-abc")
+        os.makedirs(output_root)
+        db_path = timeline_brain_db.db_path_for_project(output_root)
+        self._log_one_edit(output_root, "run-before-cleanup")
+        self.assertTrue(os.path.isfile(db_path))
+
+        manifest = {"clips": [], "artifacts_cleaned_up": False}
+        removed = _media_analysis_module._release_session_root(
+            manifest, output_root, output_root
+        )
+
+        self.assertTrue(removed, manifest)
+        self.assertFalse(
+            os.path.isdir(output_root),
+            msg=f"session root still on disk after cleanup: {output_root}",
+        )
+        self._log_one_edit(output_root, "run-after-cleanup")
+        self.assertTrue(os.path.isfile(db_path), msg=f"write went nowhere: {db_path}")
 
 
 class MediaAnalysisCoverageTests(unittest.TestCase):
@@ -4244,7 +4560,11 @@ class MediaAnalysisCoverageTests(unittest.TestCase):
                 with_transcription=False,
             )
 
-            # Request requires transcription — report is incomplete
+            # Request requires transcription AND could produce it (model
+            # download opted in) — the transcript-less report is incomplete.
+            # An enabled request that could NOT run a backend would treat the
+            # report as complete instead; see
+            # test_declined_transcription_does_not_poison_cache_reuse.
             coverage = build_coverage_report(
                 project_name="Missing Layer Project",
                 project_id="v1",
@@ -4253,7 +4573,7 @@ class MediaAnalysisCoverageTests(unittest.TestCase):
                 params={
                     "analysis_root": analysis_root,
                     "depth": "standard",
-                    "transcription": {"enabled": True},
+                    "transcription": {"enabled": True, "allow_model_download": True},
                 },
                 capabilities=self._base_capabilities(),
             )
@@ -4690,7 +5010,7 @@ class PathExistenceProbeTests(unittest.TestCase):
     def test_fresh_probe_reports_real_and_missing_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             real = os.path.join(tmp, "a.mov")
-            open(real, "w").close()
+            open(real, "w", encoding="utf-8").close()
             missing = os.path.join(tmp, "gone.mov")
             result = self.dash._probe_paths_exist([real, missing, None, ""], probe=True)
         self.assertTrue(result[real])
@@ -4701,7 +5021,7 @@ class PathExistenceProbeTests(unittest.TestCase):
     def test_background_poll_reuses_cache_without_restating(self):
         with tempfile.TemporaryDirectory() as tmp:
             real = os.path.join(tmp, "a.mov")
-            open(real, "w").close()
+            open(real, "w", encoding="utf-8").close()
             # Warm the cache with a real probe, then delete the file.
             self.dash._probe_paths_exist([real], probe=True)
             os.remove(real)
@@ -4717,7 +5037,7 @@ class PathExistenceProbeTests(unittest.TestCase):
     def test_fresh_probe_restats_after_cache_cleared(self):
         with tempfile.TemporaryDirectory() as tmp:
             real = os.path.join(tmp, "a.mov")
-            open(real, "w").close()
+            open(real, "w", encoding="utf-8").close()
             self.dash._probe_paths_exist([real], probe=True)
             os.remove(real)
             self.dash._PATH_EXISTS_CACHE.clear()  # simulate TTL expiry
@@ -4773,7 +5093,7 @@ class InventoryCacheReuseTests(unittest.TestCase):
             entry = self._entry()
             self.assertEqual(self.dash._assemble_inventory_payload(tmp, entry)["counts"]["analyzed"], 0)
             os.makedirs(os.path.join(tmp, "clips", "a-key"))
-            with open(os.path.join(tmp, "clips", "a-key", "analysis.json"), "w") as fh:
+            with open(os.path.join(tmp, "clips", "a-key", "analysis.json"), "w", encoding="utf-8") as fh:
                 fh.write("{}")
             self.assertEqual(self.dash._assemble_inventory_payload(tmp, entry)["counts"]["analyzed"], 1)
 
@@ -5106,6 +5426,53 @@ class LoudnessParsingTests(unittest.TestCase):
                 mine = _media_analysis_module._parse_loudness(sample)
                 for key in ("integrated_lufs", "loudness_range_lu", "true_peak_dbtp"):
                     self.assertEqual(mine[key], theirs[key], f"{name}/{key}")
+
+
+
+class MediaAnalysisPlanProjectRootTests(unittest.TestCase):
+    """plan["output_root"] is a mapping, not a path.
+
+    resolve_output_root() returns {"success", "base_root", "project_root", ...}.
+    str() on that mapping produces a dict repr — a non-empty string, so it
+    survives the `if wants_runner and job_id and project_root:` guard and is
+    handed to start_batch_job_runner as a directory name. The runner finds no
+    job store under it and reports {"started": False, "reason": "job_not_found"},
+    which sends the caller off to debug a job that exists and is fine.
+    """
+
+    def test_extracts_project_root_from_the_mapping(self):
+        created = {
+            "plan": {
+                "output_root": {
+                    "success": True,
+                    "base_root": "/analysis",
+                    "project_root": "/analysis/My_Project_abc123",
+                    "project_directory": "My_Project_abc123",
+                }
+            }
+        }
+        self.assertEqual(
+            _media_analysis_plan_project_root(created),
+            "/analysis/My_Project_abc123",
+        )
+
+    def test_does_not_return_a_dict_repr(self):
+        created = {"plan": {"output_root": {"project_root": "/analysis/P"}}}
+        root = _media_analysis_plan_project_root(created)
+        self.assertNotIn("{", root)
+        self.assertNotIn("project_root", root)
+
+    def test_accepts_a_plain_string_output_root(self):
+        created = {"plan": {"output_root": "/analysis/P"}}
+        self.assertEqual(_media_analysis_plan_project_root(created), "/analysis/P")
+
+    def test_missing_or_empty_yields_empty_string(self):
+        # Empty must stay falsy: it is what makes the runner guard decline
+        # instead of starting against a bogus path.
+        for created in ({}, {"plan": {}}, {"plan": {"output_root": {}}},
+                        {"plan": {"output_root": None}}):
+            self.assertEqual(_media_analysis_plan_project_root(created), "", created)
+
 
 
 if __name__ == "__main__":

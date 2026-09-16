@@ -2,19 +2,19 @@
 
 English | [简体中文](README.zh-CN.md)
 
-[![Version](https://img.shields.io/badge/upstream-2.103.2-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
+[![Version](https://img.shields.io/badge/upstream-4.7.6-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
 [![API Coverage](https://img.shields.io/badge/API%20Coverage-100%25-brightgreen.svg)](docs/reference/api-coverage.md)
-[![CLI](https://img.shields.io/badge/CLI-36%20compound%20%7C%20353%20granular-blue.svg)](#cli-surfaces)
-[![Advanced](https://img.shields.io/badge/Advanced-19%20tools%20%7C%20163%20actions-blueviolet.svg)](#cli-surfaces)
+[![CLI](https://img.shields.io/badge/CLI-37%20compound%20%7C%20389%20granular-blue.svg)](#cli-surfaces)
+[![Advanced](https://img.shields.io/badge/Advanced-19%20tools%20%7C%20168%20actions-blueviolet.svg)](#cli-surfaces)
 [![Tested](https://img.shields.io/badge/Live%20Tested-93.6%25-green.svg)](docs/reference/api-coverage.md#test-results)
 [![DaVinci Resolve](https://img.shields.io/badge/DaVinci%20Resolve-18.5+-darkred.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 A complete, Bash-composable command-line environment for DaVinci Resolve. It
-exposes the upstream project's entire implementation directly: 36 guarded
-compound tools, 353 one-method granular tools, 19 offline advanced tools with
-163 actions, 14 prompts, and every concrete or templated resource. MCP remains
+exposes the upstream project's entire implementation directly: 37 guarded
+compound tools, 389 one-method granular tools, 19 offline advanced tools with
+168 actions, 14 prompts, and every concrete or templated resource. MCP remains
 available as an optional compatibility transport; it is no longer required to
 use Resolve automation from a terminal, script, cron job, or CI worker.
 
@@ -209,15 +209,24 @@ The installer and server check the latest GitHub release for MCP updates. Checks
 
 Blackmagic gates *external* scripting to Studio: on the free edition
 `scriptapp("Resolve")` refuses a foreign process, whatever the preference says.
-The **Workspace ▸ Scripts** menu is not gated — a script launched from it is
-handed the live `resolve` object on any edition — so the server can reach the
-free edition through a small script that runs *inside* Resolve and re-exports it
-over an authenticated loopback listener.
+Through Resolve 21.0.x the **Workspace ▸ Scripts** menu was not gated — a script
+launched from it is handed the live `resolve` object (measured on free 21.0.3.7) —
+so the server can reach the free edition through a small script that runs *inside*
+Resolve and re-exports it over an authenticated loopback listener. **Resolve 21.1
+moved Python scripting to Studio.** On free 21.1 the Scripts menu no longer lists
+`.py` files at all (reported on Fedora 44 in #203; a Lua script in the same folder
+lists normally). Whether the Console still runs Python there is unconfirmed, so
+treat the bridge as a 21.0.x path until that is measured.
 
 ```bash
 python scripts/install_resolve_bridge.py
 # restart Resolve, open a project, then: Workspace > Scripts > resolve_bridge
 ```
+
+The installer and MCP client use `~/.config/davinci-resolve-mcp/bridge.json`
+by default. To keep the authenticated bridge config elsewhere, set
+`DAVINCI_RESOLVE_BRIDGE_CONFIG` while running the installer and in the MCP
+client environment; both sides will use that path.
 
 Once that listener is running it is used **automatically** whenever external
 scripting is unavailable — no environment variable required. Setting
@@ -241,6 +250,20 @@ Use `launchctl setenv`, not `export` — Resolve is launched from the Dock and
 never sees your shell's environment. Restart Resolve afterwards. A Lua canary is
 installed alongside so you can tell "Python not detected" apart from a wrong
 folder.
+
+Two things that bite (#182). The prefix must contain **both**
+`lib/libpython3.X.dylib` and `bin/python3` under that exact **unversioned**
+name — Homebrew's framework builds often ship only `bin/python3.13`, which is
+half a Python as far as Resolve is concerned, and the installer's preflight now
+says so instead of reporting a usable prefix. And `launchctl setenv` **does not
+survive a reboot**; if scripts stop listing weeks later with no error, that is
+why. For something persistent, put an interpreter where Resolve already looks
+(this one needs `sudo`, and check that `/usr/local/bin` does not precede your
+normal Python on `PATH`):
+
+```bash
+sudo ln -s "$(command -v python3)" /usr/local/bin/python3
+```
 
 Validated on free 21.0.3.7 and Studio 19.1.3.7, both macOS. The Windows paths
 added in v2.70.1 (issue #106) shipped unverified; reports on free 21.0.1.11
@@ -276,9 +299,9 @@ The command starts a loopback-only server and opens the control panel in your br
 
 | Surface | CLI form | Coverage | Resolve required |
 |---|---|---:|---|
-| Compound | `dvr TOOL ACTION ...` | 36 tools | Usually |
-| Granular | `dvr granular TOOL ...` | 353 tools | Usually |
-| Advanced | `dvr advanced TOOL ACTION ...` | 19 tools / 163 actions | No |
+| Compound | `dvr TOOL ACTION ...` | 37 tools | Usually |
+| Granular | `dvr granular TOOL ...` | 389 tools | Usually |
+| Advanced | `dvr advanced TOOL ACTION ...` | 19 tools / 168 actions | No |
 | Prompts/resources | `dvr prompts`, `dvr resources` | 14 prompts / 37 resource entries | Depends on item |
 | Durable batch | `dvr batch ...` | analysis jobs + project specs | Depends on command |
 | Production pipeline | `dvr production ...` | track stems, word-timed ASR, chunks, research, Remotion | Depends on stage |
@@ -291,8 +314,8 @@ with `dvr completion bash`, `zsh`, or `fish`.
 
 | Mode | CLI entry point | Tools | Best for |
 |------|-------------|-------|----------|
-| Compound | `dvr server` | 36 | MCP clients that prefer grouped action tools. |
-| Full / granular | `dvr granular-server` or `dvr server --full` | 353 | MCP clients that want one tool per Resolve API method. |
+| Compound | `dvr server` | 37 | MCP clients that prefer grouped action tools. |
+| Full / granular | `dvr granular-server` or `dvr server --full` | 389 | MCP clients that want one tool per Resolve API method. |
 
 The compound server is recommended unless you specifically need the granular one-tool-per-method surface.
 
@@ -337,6 +360,12 @@ Add it alongside the live server (both ship in one `npm install`):
 `install.py` prints both entries. The core is pure-JS/MIT with no required native modules; a few features
 need user-installed tools (ffmpeg for `audio`, `sharp`/`better-sqlite3` for some paths) — call the
 `capabilities` tool for live status and install hints.
+
+Unlike the Python server, this one has Node dependencies. `npx davinci-resolve-mcp setup` installs them
+into the managed install (`npm install --omit=dev --omit=optional` under `resolve-advanced/`) and only
+then registers the bin. If that install could not run — offline, or npm unavailable — setup registers
+an `npx` command for the advanced server instead, so the entry it writes always boots. To repair an
+existing install without re-running setup: `npx davinci-resolve-mcp sync`.
 
 ### Bradford Post Assistant — managed application (closed beta)
 
@@ -404,6 +433,114 @@ The open-source servers are complete and fully functional on their own.
 | Extension authoring | Fuse, DCTL, ACES DCTL, and Resolve-page Lua/Python script lifecycle helpers with safe MCP-marked install/remove |
 | Craft guidance | The bundled editorial, colour, audio, and workflow guidance served as prose over MCP — indexed, searchable, and readable by any client, not just ones with this repository on disk |
 
+### Operation envelope
+
+Every compound tool return carries an `_operation` block beside its payload, so
+an agent reads one shape instead of a different key per tool: `status`
+(`success` / `partial` / `blocked` / `failed`), `verification` (with
+`contradiction` kept distinct — Resolve reported success and the readback
+disagreed), `changes` (the semantic delta), `warnings`, and an `execution_id`.
+
+Two absences are meaningful and deliberate. `verification.status: "unverified"`
+means *no evidence was reported*, not "checked and clean". A missing `changes`
+means the action did not report a delta, not that nothing changed — an empty
+`{}` there would be a confident, wrong answer about an edit that simply never
+declared one.
+
+The envelope is namespaced rather than merged into the top level because
+`status`, `operation`, `warnings`, `result` and `changes` are all already domain
+keys here; flattening would rewrite a background job's `status: "done"` and a
+confirm gate's `status: "confirmation_required"`. `setup(action="set_defaults",
+params={"result_envelope": "pure" | "legacy"})` changes the shape, per call via
+`params={"envelope": ...}`, per process via `RESOLVE_MCP_RESULT_ENVELOPE`.
+
+### Agent execution traces ("Why did the editor do this?")
+
+Multi-step AI operations correlate across tool calls into unified execution
+traces. Each trace aggregates tool durations (`duration_ms`), call counts, cumulative
+semantic deltas (`items_deleted`, `items_added`), and readback verifications.
+Agents and editors can inspect workflows via `resolve_control`:
+`get_execution_trace(execution_id?)`, `list_recent_executions()`, or open a
+scoped execution with `begin_execution(request="...")` / `end_execution()`.
+`export_execution_report(execution_id?, format="markdown"|"json")` writes a
+reviewable audit artifact with the same summary, defaulting to
+`logs/execution-reports/<execution_id>.md`. `path` writes it anywhere you want
+it instead — alongside a conform in a dated TransferFiles folder, say — and
+creates the directories to get there, so check the path before you send it.
+An existing file is never replaced without `overwrite: true`.
+`inspect_operation(tool?, target_action?, target_params?)` evaluates pre-flight
+risk level (`low`, `medium`, `high`, `critical`), destructive potential, and blast
+radius (`item`, `track`, `timeline`, `project`, `system`) before taking action, while
+`list_lifecycle_hooks()` inspects active execution interceptors.
+
+It is a heuristic over action names, not a simulation — it never touches the
+project and does not validate your parameters, so `recognised: false` means the
+levels are defaults rather than a finding, and `snapshot_available: null` means
+rollback availability was not determined rather than absent. Every shipped hook
+observes; none replaces a tool's result, so `dry_run` always reaches the real
+handler and nothing synthesises a preview for an action that has none.
+
+A report for a run where nothing was verified says **"not established — no
+checks recorded"**, not "passed". Absence of evidence is a question still open,
+and an audit document is the last place to let a reader read it as an all-clear.
+
+Traces live in a 100-entry in-memory ring and are appended to
+`logs/execution-traces.jsonl` beside `server.log` — `RESOLVE_MCP_TRACE_FILE`
+moves it, and `RESOLVE_MCP_LOG_FILE` moves `server.log` itself (a path, or empty
+for no file; the offline test suite points it at a temporary file so it never
+writes into the operator's log). `list_recent_executions` reports that path and whether it is
+writable, so "the log is empty" and "nothing is being written" are
+distinguishable without reading the source. What is recorded is tool name,
+action, timing, status, semantic deltas and verification — no parameters and no
+file paths. The one free-text field is the `request` you pass to
+`begin_execution`, so treat it the way you would a commit message on a client
+project.
+
+## Verified-Trap Guard
+
+`src/utils/api_truth.py` records behaviours of the Resolve API that were measured
+against a live build rather than read off a signature — calls that return `True`
+having done nothing, settings keys silently rejected, methods that are not there
+at all. That ledger used to be **pull-only**: it answered
+`resolve_control(action="api_truth")` and was otherwise a file nobody greps in
+the middle of a job.
+
+It now reaches the caller at the callsite. An action mapped to a symbol with a
+recorded fact carries a compact `known_limitation` on its result — symbol,
+reality, recommendation, and nothing else, because response weight is a real cost
+on a long grading session and the full entry is one lookup away.
+
+A fact is only attached when the mapping names that exact symbol. Nothing is
+inferred from a similar name: an unrelated explanation stapled to a failure reads
+as a diagnosis, and a wrong diagnosis is worse than none.
+
+**One behaviour refuses rather than warns.** `TimelineItem.CopyGrades` replaces
+the target's grade wholesale — measured by baking each state to a 33-point LUT
+and comparing bytes — returns `True` while doing it, and creates no version to go
+back to. Applied to clips carrying hand-work, that is unrecoverable loss reported
+as success. So actions that call it refuse until the caller passes
+`acknowledge_trap: true`:
+
+```json
+{
+  "success": false,
+  "error": "'timeline_item_color.copy_grades' is refused: its verified behaviour destroys existing work that cannot be recovered afterwards.",
+  "known_limitation": [{"symbol": "TimelineItem.CopyGrades", "reality": "...", "recommended": "..."}],
+  "retry_with": {"acknowledge_trap": true}
+}
+```
+
+The intent is not to forbid the operation — it is to make the caller say out loud
+that they know what it does. Dry runs are exempt: a preview destroys nothing.
+
+Set `RESOLVE_MCP_DISABLE_TRAP_GUARD=1` to turn both the refusal and the advisory
+push off. This is a behaviour change for callers that previously received a bare
+`{"success": true}` from a destructive copy.
+
+Facts that power a refusal must stay re-measurable, so a live probe re-derives
+each one and records `drifted` when Resolve stops agreeing; a test fails if a
+`destroys_prior_work` entry has no probe.
+
 ## Optional Extras
 
 The core install is deliberately small: Python, ffmpeg, and the Resolve scripting
@@ -437,7 +574,7 @@ cheaper to read it here than to discover it mid-project.
 | Not supported | Why, and what you get instead |
 |---|---|
 | **Choosing the best take** | Performance is most of what makes a take right, and none of it is measurable from a waveform or a transcript. `rank_takes` ranks *fluency* — fillers, restarts, script coverage — and says so in every response. The take that plays is regularly the least fluent one, because the hesitation is often the acting. Use it to find the clean safety take, not to choose the read. |
-| **Finishing music cuts** | `edit_engine plan_beat_cuts` detects beats, bars, and phrases when `librosa` is installed, but it produces a reviewable cut plan rather than judging or committing a finished music edit for you. |
+| **Automatic music editing** | Optional `librosa` support provides beat detection and beat/bar/phrase cut-point plans, not a finished assembly. Downbeats are inferred from the first beat; use `beat_offset` for pickups. Speech-silence tools are unsuitable for finding musical edit points. |
 | **Judging a cut** | Nothing here has an opinion about whether an edit is good. Every destructive action is plan → review → confirm for that reason. |
 | **Replacing an editor** | The output is a first-pass assembly, in the assistant-editor sense: ingest, sync, organize, string out, flag problems. It is a starting point you cut, not a finished cut. Defaults are deliberately **generous** — a first assembly is supposed to run long, because trimming is fast and visible while recovering discarded material is slow and invisible. |
 | **Modifying your source media** | By design and without exception — see below. |
@@ -451,13 +588,13 @@ This project treats camera originals and source media as immutable. Analysis too
 
 ## Security Posture
 
-The default server is a local stdio process launched by your MCP client; it does not expose a network listener or built-in multi-user auth surface. The two opt-in local HTTP surfaces — the control panel and the networked MCP transport — bind loopback only and require a per-launch bearer token on every request, with Host/Origin checks against DNS rebinding and CSRF. Tool metadata includes MCP client-safety hints for read-only, destructive, idempotent, and external-resource operations. See [Security Policy](SECURITY.md) for operational boundaries, confirmation guidance, and vulnerability reporting.
+The default server is a local stdio process launched by your MCP client; it does not expose a network listener or built-in multi-user auth surface. The two opt-in local HTTP surfaces — the control panel and the networked MCP transport — bind loopback only and require a per-launch bearer token on every request, with Host/Origin checks against DNS rebinding and CSRF. Tool metadata includes MCP client-safety hints for read-only, destructive, idempotent, and external-resource operations. Destructive writes on both servers honour `destructive.safe_mode` and the security audit log; only the compound server archives a timeline before mutating it — granular writes are refused or recorded, never recovered. See [Security Policy](SECURITY.md) for operational boundaries, confirmation guidance, and vulnerability reporting.
 
 ## Key Stats
 
 | Metric | Value |
 |--------|-------|
-| MCP Tools | **36** compound / **353** granular (live server) |
+| MCP Tools | **37** compound / **389** granular (live server) |
 | Advanced (offline) tools | **19** — .drp/.drt/.drx + DB/caption authoring, no Resolve running |
 | Kernel Actions | **136** guarded workflow actions across 9 compound tools |
 | API Methods Covered | **361/361** (100%) |
@@ -485,6 +622,8 @@ For method-by-method status, see [API Coverage and Test Results](docs/reference/
 | [Multicam Setup Helper Guide](docs/guides/multicam-setup-guide.md) | Stacked timeline prep, helper/API boundary, and Resolve UI conversion steps |
 | [Editorial Decision Guide](docs/guides/editorial-decision-guide.md) | Project-owned editorial craft guidance for analysis and timeline decisions |
 | [Conforming an Avid AAF](docs/guides/conforming-an-avid-aaf.md) | Why all three Resolve-native routes fail on a consolidated turnover, and which one is dangerous |
+| [Native .drt Authoring](docs/guides/native-drt-authoring.md) | Offline template-spliced timeline authoring: cuts, retimes, transitions, fades, markers, compounds — and the measured laws behind them |
+| [Headless Edit Loop](docs/guides/headless-edit-loop.md) | Driving Resolve from the command line: which interchange formats relink and round-trip, measured in GUI and -nogui |
 | [Color Decision Guide](docs/guides/color-decision-guide.md) | Project-owned color correction guidance and Resolve color API boundaries |
 | [Contributing and Project Layout](docs/contributing.md) | Contribution workflow, platform support, security notes, repository structure |
 | [Security Policy](SECURITY.md) | Local stdio trust boundary, tool metadata, confirmation guidance, reporting |
@@ -502,6 +641,17 @@ Extension authoring references live in [docs/authoring](docs/authoring/). Resolv
   instead.
 
 Resolve 19.1.3 remains the compatibility baseline. Resolve 20.x scripting calls are additive, version-guarded, and live-tested on 20.3.2. Resolve 21.0 scripting additions (audio classification, speaker-detection transcription, IntelliSearch, slate analysis, motion-deblur, speech generation, session background-task control) are exposed behind runtime capability detection, so they stay inert on older builds and activate automatically on Resolve 21+. They are live-tested on Studio 21.0.2.4 — see the [Resolve 21 delta](docs/reference/api-coverage.md#resolve-21-delta-detail). Note that `AnalyzeForIntellisearch`, `AnalyzeForSlate` and `GenerateSpeech` each require a separately-downloaded AI Extras pack, and Resolve reports a missing pack inconsistently (some return `False`, others an error string), so these actions report `success: false` with the Resolve-supplied reason rather than guessing.
+
+## Reporting Bugs and Requesting Features
+
+Tell your assistant "send this as a bug" or "send this as a feature request". It
+drafts a GitHub issue from the conversation, including the failing call and
+its error, and attaches the server version, Resolve build, connection mode and
+OS. Local paths, your username and anything that looks like a secret are
+redacted. Nothing is filed for you: you get a prefilled link, review the
+draft, and submit it on GitHub yourself. You can also
+[open an issue](https://github.com/samuelgursky/davinci-resolve-mcp/issues/new/choose)
+directly.
 
 ## Development
 

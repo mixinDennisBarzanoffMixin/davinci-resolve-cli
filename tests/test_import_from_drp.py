@@ -183,23 +183,76 @@ class DrpSeqContainerTests(unittest.TestCase):
         with zipfile.ZipFile(TEMPLATE_DRP, "r") as zf:
             containers = _drp_seq_containers(zf)
         self.assertGreaterEqual(len(containers), 1)
-        self.assertEqual(containers[0]["name"], "sample.mp4")
+        self.assertEqual(containers[0]["name"], "MediaTemplate")  # E129: the pool's timeline name, not the first clip's
         self.assertTrue(containers[0]["entry"].startswith("SeqContainer/"))
 
-    def test_extract_produces_minimal_drt(self):
+    def test_extract_produces_importable_drt(self):
+        """The importable-.drt recipe, measured by bisection on 19.1.3.7:
+        keep project.xml + MediaPool/ + the SeqContainer at its ORIGINAL uuid
+        path (renaming it imports an EMPTY timeline with no error), drop
+        Gallery. Live-verified: extracts import with their clips intact."""
         with zipfile.ZipFile(TEMPLATE_DRP, "r") as zf:
             entry = _drp_seq_containers(zf)[0]["entry"]
+            source_names = [n for n in zf.namelist() if not n.endswith("/")]
         out = tempfile.mktemp(suffix=".drt")
         try:
             _extract_seqcontainer_from_drp(TEMPLATE_DRP, entry, out)
             with zipfile.ZipFile(out, "r") as z:
                 names = z.namelist()
-            self.assertIn("Primary1/SeqContainer1.xml", names)
+            self.assertIn(entry, names, "SeqContainer must keep its original path")
+            self.assertNotIn("Primary1/SeqContainer1.xml", names,
+                             "the rename orphans the clips (items=0 on import)")
             self.assertIn("metadata.json", names)
-            self.assertNotIn("project.xml", names)  # a .drt has no project shell
+            if "project.xml" in source_names:
+                self.assertIn("project.xml", names)
+            if any(n.startswith("MediaPool/") for n in source_names):
+                self.assertTrue(any(n.startswith("MediaPool/") for n in names),
+                                "MpFolder holds the Sm2Sequence/Sm2Timeline objects")
+            self.assertNotIn("Gallery.xml", names)
         finally:
             if os.path.exists(out):
                 os.unlink(out)
+
+    def test_extract_drops_other_timelines_mpfolder_blocks(self):
+        """A multi-timeline source: the non-target timeline's Sm2MpTimelineClip
+        block must go, or it imports as a ghost empty timeline."""
+        def container(seq_id):
+            return (f'<?xml version="1.0"?><Sm2SequenceContainer DbId="c">'
+                    f"<VideoTrackVec><Element><Sm2TiTrack DbId=\"t\">"
+                    f"<Sequence>{seq_id}</Sequence></Sm2TiTrack></Element>"
+                    f"</VideoTrackVec></Sm2SequenceContainer>")
+        alpha_seq = "aaaaaaaa-1111-2222-3333-444444444444"
+        beta_seq = "bbbbbbbb-1111-2222-3333-444444444444"
+        mp = ("<Sm2MpFolder>"
+              "<Element><Sm2MpTimelineClip DbId=\"a\"><Name>ALPHA</Name>"
+              f"<Sm2Sequence DbId=\"{alpha_seq}\"><Id>{alpha_seq}</Id></Sm2Sequence>"
+              "</Sm2MpTimelineClip></Element>"
+              "<Element><Sm2MpTimelineClip DbId=\"b\"><Name>BETA</Name>"
+              f"<Sm2Sequence DbId=\"{beta_seq}\"><Id>{beta_seq}</Id></Sm2Sequence>"
+              "</Sm2MpTimelineClip></Element>"
+              "</Sm2MpFolder>")
+        src = tempfile.mktemp(suffix=".drp")
+        out = tempfile.mktemp(suffix=".drt")
+        try:
+            with zipfile.ZipFile(src, "w") as z:
+                z.writestr("project.xml", "<SM_Project/>")
+                z.writestr("MediaPool/Master/MpFolder.xml", mp)
+                z.writestr("SeqContainer/aaaa.xml", container(alpha_seq))
+                z.writestr("SeqContainer/bbbb.xml", container(beta_seq))
+                z.writestr("Gallery.xml", "<g/>")
+            _extract_seqcontainer_from_drp(src, "SeqContainer/aaaa.xml", out)
+            with zipfile.ZipFile(out, "r") as z:
+                names = z.namelist()
+                folder = z.read("MediaPool/Master/MpFolder.xml").decode()
+            self.assertIn("SeqContainer/aaaa.xml", names)
+            self.assertNotIn("SeqContainer/bbbb.xml", names)
+            self.assertNotIn("Gallery.xml", names)
+            self.assertIn("ALPHA", folder)
+            self.assertNotIn("BETA", folder, "ghost timeline block must be removed")
+        finally:
+            for f in (src, out):
+                if os.path.exists(f):
+                    os.unlink(f)
 
 
 class ImportFromDrpTests(unittest.TestCase):
@@ -212,7 +265,7 @@ class ImportFromDrpTests(unittest.TestCase):
         res = _import_from_drp(None, None, {"drpPath": TEMPLATE_DRP, "timelineNames": ["No Such TL"]})
         self.assertTrue(_is_error(res))
         self.assertIn("not found", _err_msg(res))
-        self.assertIn("sample.mp4", _remediation(res))
+        self.assertIn("MediaTemplate", _remediation(res))  # E129: the pool's timeline name, not the first clip's
 
     def test_dry_run_selects_all(self):
         res = _import_from_drp(None, None, {"drpPath": TEMPLATE_DRP, "dry_run": True})
@@ -226,12 +279,12 @@ class ImportFromDrpTests(unittest.TestCase):
     def test_full_extract_and_import_glue(self):
         proj = _FakeProject()
         mp = _FakeMediaPool(proj)
-        res = _import_from_drp(proj, mp, {"drpPath": TEMPLATE_DRP, "timelineNames": ["sample.mp4"]})
+        res = _import_from_drp(proj, mp, {"drpPath": TEMPLATE_DRP, "timelineNames": ["MediaTemplate"]})  # E129: the pool's timeline name, not the first clip's
         self.assertTrue(res.get("success"), res)
         self.assertEqual(res.get("selected"), 1)
         self.assertEqual(res.get("imported"), 1)
         row = res["results"][0]
-        self.assertEqual(row.get("requested"), "sample.mp4")
+        self.assertEqual(row.get("requested"), "MediaTemplate")  # E129: the pool's timeline name, not the first clip's
         self.assertTrue(row.get("success"))
         self.assertEqual(proj.GetTimelineCount(), 1)
 

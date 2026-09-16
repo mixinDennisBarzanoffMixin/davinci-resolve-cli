@@ -20,7 +20,8 @@ green 2560-test run and would only have surfaced in the publish gate, which runs
 a script.
 
 Fix drift by updating the docs to the printed counts, not by loosening this test.
-The counts are cross-checked against the runtime tool registry and agree: 34 / 353.
+Keep this guard free of hand-written expected counts; it computes the authoritative
+values from the source tree so the assertion moves with the implementation.
 
 Decorators are counted from the **parsed syntax tree**, not by matching the text
 `@mcp.tool(`. A regex counts the string wherever it appears, including inside a
@@ -58,7 +59,7 @@ def _count_decorators(*rel_globs: str) -> int:
 
 
 def _advanced_count() -> int:
-    idx = (ROOT / "resolve-advanced" / "server" / "tools" / "index.mjs").read_text()
+    idx = (ROOT / "resolve-advanced" / "server" / "tools" / "index.mjs").read_text(encoding="utf-8")
     m = re.search(r"export const TOOLS\s*=\s*Object\.freeze\(\[([^\]]+)\]\)", idx)
     if not m:
         raise AssertionError(
@@ -79,7 +80,7 @@ class DocToolCountsDriftTest(unittest.TestCase):
             ("README.md", f"{adv} tools:"),
             ("README.md", f"**{comp}** compound / **{gran}** granular"),
             ("README.md", f"Advanced (offline) tools | **{adv}**"),
-            ("README.md", f"Advanced-{adv}%20tools%20%7C%20163%20actions"),
+            ("README.md", f"Advanced-{adv}%20tools%20%7C%20168%20actions"),
             ("README.md", f"CLI-{comp}%20compound%20%7C%20{gran}%20granular"),
             ("README.zh-CN.md", f"MCP%20Tools-{comp}%20({gran}%20full)"),
             ("README.zh-CN.md", f"`src/resolve_mcp_server.py` | {gran} |"),
@@ -88,6 +89,7 @@ class DocToolCountsDriftTest(unittest.TestCase):
             ("docs/install.md", f"`src/server.py` | {comp} |"),
             ("docs/install.md", f"`src/resolve_mcp_server.py` | {gran} |"),
             ("docs/install.md", f"full {gran}-tool server"),
+            ("install.py", f'{comp} compound · {gran} full · 3 platforms'),
             ("src/resolve_mcp_server.py", f"({gran} granular tools)"),
             ("tests/test_import.py", f"assert total == {gran}"),
             # test_import.py hard-codes the compound count too. Adding a 35th
@@ -106,7 +108,7 @@ class DocToolCountsDriftTest(unittest.TestCase):
 
         stale = []
         for rel, needle in checks:
-            text = (ROOT / rel).read_text()
+            text = (ROOT / rel).read_text(encoding="utf-8")
             if needle not in text:
                 stale.append(f"{rel}: expected to contain {needle!r}")
 
@@ -116,7 +118,7 @@ class DocToolCountsDriftTest(unittest.TestCase):
         # went out to every agent. Any *other* number in front of the phrase is
         # drift, wherever it sits.
         for rel in ("src/server.py", "docs/SKILL.md", "docs/contributing.md"):
-            text = (ROOT / rel).read_text()
+            text = (ROOT / rel).read_text(encoding="utf-8")
             for wrong in re.findall(r"\b(\d+)\s+compound tools", text):
                 if int(wrong) != comp:
                     stale.append(

@@ -61,6 +61,14 @@ function setClipIn(clipXml, framePos) {
   if (/<In>[^<]*<\/In>/.test(clipXml)) return clipXml.replace(/<In>[^<]*<\/In>/, enc);
   return clipXml; // no In element to set
 }
+// A FROZEN clip carries an EMPTY <In/> (harvested live from an EDL M2 000.0
+// freeze on 19.1.3.7) — the frozen position lives in its Sm2TimeMap, and
+// record windowing does not apply to a constant map.
+function setClipInEmpty(clipXml) {
+  if (/<In\s*\/>/.test(clipXml)) return clipXml;
+  if (/<In>[^<]*<\/In>/.test(clipXml)) return clipXml.replace(/<In>[^<]*<\/In>/, '<In/>');
+  return clipXml;
+}
 
 // Rewrite each clip on a track via fn(clipXml) -> clipXml. Clips have unique DbIds so a
 // first-occurrence replace per clip is unambiguous.
@@ -442,4 +450,8 @@ async function rippleTimeline(drpInput, opts = {}) {
   return { buffer, entry, timelineUuid: seqId, at, delta, shifted };
 }
 
-module.exports = { moveClip, deleteClip, trimClip, trimClipHead, splitClip, rippleTimeline };
+module.exports = {
+  moveClip, deleteClip, trimClip, trimClipHead, splitClip, rippleTimeline,
+  // low-level clip-XML helpers, reused by cut-media.js
+  clipDbId, clipStart, clipDuration, clipIn, setClipStart, setClipDuration, setClipIn, setClipInEmpty,
+};

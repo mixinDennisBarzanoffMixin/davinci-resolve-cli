@@ -20,6 +20,117 @@ def _ps(stdout: str):
     return mock.Mock(returncode=0, stdout=stdout)
 
 
+def _ps_table(comm: str, args: str):
+    """A fake `ps` that answers the executable column and the argv column
+    separately, keyed by pid — the shape the real scan reads."""
+    def run(argv, **_kwargs):
+        columns = argv[-1] if argv and argv[0] == "ps" else ""
+        return mock.Mock(returncode=0, stdout=args if "args" in columns else comm)
+    return run
+
+
+class ProcessTableTests(unittest.TestCase):
+    """The scan counts an instance on its executable path OR its argv.
+
+    On 2026-09-08 `resolve_control runtime_mode` answered `running: false,
+    instances: 0` while Studio 19.1.3.7 was up at the stock path and answering
+    scripting calls in the same minute. That exact condition did not reproduce
+    afterwards (the same instance, restarted, matched), so the fix removes the
+    scan's single point of failure instead of guessing at the trigger: an
+    argv-only scan is blind whenever the kernel withholds the argument vector
+    (`ps` prints `(Resolve)`) and whenever a launch argument follows the path.
+    The executable column is readable whenever the process is.
+    """
+    EXE = "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/MacOS/Resolve"
+    XPC = ("/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/XPCServices/"
+           "IOXPC.xpc/Contents/MacOS/IOXPC")
+
+    def test_the_stock_macos_table_is_one_gui_instance(self) -> None:
+        """The real table from the day of the report: pid 39560 at the stock path,
+        its IOXPC helper beside it, argv identical to the executable."""
+        comm = f"    1 /sbin/launchd\n39560 {self.EXE}\n39561 {self.XPC}\n"
+        args = f"    1 /sbin/launchd\n39560 {self.EXE}\n39561 {self.XPC}\n"
+        with mock.patch.object(rr.subprocess, "run", side_effect=_ps_table(comm, args)):
+            mode = rr.runtime_mode()
+        self.assertTrue(mode["running"])
+        self.assertEqual(mode["instances"], 1, "the XPC helper is not an instance")
+        self.assertIs(mode["headless"], False)
+        self.assertEqual(mode["command_lines"], [self.EXE])
+
+    def test_an_unreadable_argv_still_counts_by_executable_path(self) -> None:
+        """`ps` prints `(Resolve)` when it cannot read the argument vector. The
+        instance is real; only its mode is unknown — None, not False."""
+        comm = f"39560 {self.EXE}\n39561 {self.XPC}\n"
+        args = "39560 (Resolve)\n39561 (IOXPC)\n"
+        with mock.patch.object(rr.subprocess, "run", side_effect=_ps_table(comm, args)):
+            mode = rr.runtime_mode()
+        self.assertTrue(mode["running"])
+        self.assertEqual(mode["instances"], 1)
+        self.assertIsNone(mode["headless"], "mode cannot be read from an unreadable argv")
+        self.assertEqual(mode["command_lines"], [self.EXE])
+
+    def test_a_launch_argument_after_the_path_does_not_hide_the_instance(self) -> None:
+        """A project file handed to the binary on the command line is not a
+        flag, so the flag-stripping suffix test used to leave it attached."""
+        args = f"39560 {self.EXE} /Users/sam/Projects/Show.drp\n"
+        comm = f"39560 {self.EXE}\n"
+        with mock.patch.object(rr.subprocess, "run", side_effect=_ps_table(comm, args)):
+            mode = rr.runtime_mode()
+        self.assertTrue(mode["running"])
+        self.assertEqual(mode["instances"], 1)
+        # And the same line with only argv readable — the executable extraction
+        # itself must handle it, not just the comm fallback.
+        self.assertTrue(rr._is_resolve_command(f"{self.EXE} /Users/sam/Projects/Show.drp"))
+        self.assertTrue(rr._is_resolve_command(f"{self.EXE} /Users/sam/Projects/Show.drp -nogui"))
+        self.assertEqual(rr._executable_from_line(f"{self.EXE} /Users/sam/Projects/Show.drp"),
+                         self.EXE)
+
+    def test_a_flag_after_a_launch_argument_still_reads_as_headless(self) -> None:
+        args = f"39560 {self.EXE} /Users/sam/Projects/Show.drp -nogui\n"
+        comm = f"39560 {self.EXE}\n"
+        with mock.patch.object(rr.subprocess, "run", side_effect=_ps_table(comm, args)):
+            self.assertTrue(rr.runtime_mode()["headless"])
+
+    def test_an_unquoted_shell_line_naming_the_binary_is_still_not_an_instance(self) -> None:
+        """`/bin/sh -c /opt/resolve/bin/resolve -nogui` contains the pattern at a
+        token boundary; the flag token before it is what marks it as a shell."""
+        args = "4242 /bin/sh -c /opt/resolve/bin/resolve -nogui\n"
+        comm = "4242 /bin/sh\n"
+        with mock.patch.object(rr.subprocess, "run", side_effect=_ps_table(comm, args)):
+            mode = rr.runtime_mode()
+        self.assertFalse(mode["running"])
+        self.assertEqual(mode["instances"], 0)
+
+    def test_ps_is_asked_for_wide_output(self) -> None:
+        """Without -ww BSD ps may cut a long command line to the terminal width,
+        and a cut line no longer ends in the executable."""
+        seen = []
+
+        def run(argv, **_kwargs):
+            seen.append(argv)
+            return mock.Mock(returncode=0, stdout="")
+        with mock.patch.object(rr.platform, "system", return_value="Darwin"), \
+                mock.patch.object(rr.subprocess, "run", side_effect=run):
+            rr.runtime_mode()
+        self.assertTrue(seen, "ps was not run")
+        for argv in seen:
+            self.assertEqual(argv[0], "ps")
+            self.assertIn("-Awwo", argv, argv)
+
+    def test_one_column_failing_does_not_make_the_answer_unknown(self) -> None:
+        """If the argv column cannot be read at all but the executable column
+        can, the instance is still counted; only both failing is undeterminable."""
+        def run(argv, **_kwargs):
+            if "args" in argv[-1]:
+                raise OSError("no argv for you")
+            return mock.Mock(returncode=0, stdout=f"39560 {self.EXE}\n")
+        with mock.patch.object(rr.subprocess, "run", side_effect=run):
+            mode = rr.runtime_mode()
+        self.assertTrue(mode["determinable"])
+        self.assertTrue(mode["running"])
+        self.assertIsNone(mode["headless"])
+
+
 class RuntimeModeTests(unittest.TestCase):
     GUI = "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/MacOS/Resolve"
     HEADLESS = GUI + " -nogui"
@@ -268,6 +379,147 @@ class MatrixTests(unittest.TestCase):
         gui, _ = self._reports()
         matrix = hd.build_matrix(gui, gui)
         self.assertIn("every observation reached parity", hd.render_matrix_markdown(matrix))
+
+
+class WindowsProcessReadersTest(unittest.TestCase):
+    r"""The Windows reader chain, and why there is a chain at all.
+
+    WMIC was removed in Windows 11 build 26200 — not on PATH, and absent from
+    C:\Windows\System32\wbem. Spawning it raises FileNotFoundError, the read
+    returned None, and None is "cannot determine", so every tool refused with
+    RESOLVE_NOT_RUNNING while Resolve ran in front of the user. Reported in
+    #210 with the PowerShell replacement, verified there on build 26200; the
+    maintainer has no Windows machine, so these tests are the local half and
+    the hardware half is the reporter's.
+    """
+
+    EXE = r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe"
+
+    def _readers(self, *, wmic=None, powershell=None, pwsh=None):
+        """A fake spawn where each reader either answers or is not installed.
+
+        None means "this binary does not exist here" — FileNotFoundError, the
+        way a missing executable actually fails, not a non-zero exit.
+        """
+        answers = {"wmic": wmic, "powershell": powershell, "pwsh": pwsh}
+
+        def run(command, *args, **kwargs):
+            answer = answers.get(command[0])
+            if answer is None:
+                raise FileNotFoundError(2, "not found: " + command[0])
+            return mock.Mock(returncode=answer[0], stdout=answer[1])
+
+        return run
+
+    def _cim(self, command_line, executable=None, pid=12692, name="Resolve.exe"):
+        return "%d\t%s\t%s\t%s" % (
+            pid, name, self.EXE if executable is None else executable, command_line)
+
+    def _mode(self, run):
+        with mock.patch.object(rr.platform, "system", return_value="Windows"):
+            with mock.patch.object(rr.subprocess, "run", side_effect=run):
+                return rr.runtime_mode()
+
+    def test_a_machine_without_wmic_still_sees_the_running_resolve(self) -> None:
+        """The reported bug: the only reader is gone, so the answer was None."""
+        mode = self._mode(self._readers(powershell=(0, self._cim('"%s"' % self.EXE))))
+        self.assertTrue(mode["determinable"])
+        self.assertTrue(mode["running"])
+        self.assertEqual(mode["instances"], 1)
+        self.assertFalse(mode["headless"])
+
+    def test_the_flag_survives_the_new_reader(self) -> None:
+        """Headless detection is the whole reason a command line is read at
+        all; a fallback that lost `-nogui` would be a silent downgrade."""
+        mode = self._mode(self._readers(powershell=(0, self._cim('"%s" -nogui' % self.EXE))))
+        self.assertTrue(mode["running"])
+        self.assertTrue(mode["headless"])
+
+    def test_an_unreadable_command_line_is_still_a_running_instance(self) -> None:
+        """The case that decided the query's shape.
+
+        A Resolve running elevated or under another account can answer
+        ExecutablePath while CommandLine comes back empty. Reading only the
+        command line makes that instance no row at all — an empty list, which
+        does not mean "cannot tell", it means "nothing is running", and that
+        is the answer that launches a second Resolve onto a live one. The
+        executable column keeps it counted; the mode is honestly unknown.
+        """
+        mode = self._mode(self._readers(powershell=(0, self._cim(""))))
+        self.assertTrue(mode["running"])
+        self.assertEqual(mode["instances"], 1)
+        self.assertIsNone(mode["headless"], "no argv means the mode is unknown, not GUI")
+
+    def test_only_the_process_name_survives_and_it_is_still_an_instance(self) -> None:
+        """The shape the reporter actually measured on build 26200.
+
+        Querying as an unelevated user, a process the caller cannot fully read
+        comes back with ProcessId and Name populated and CommandLine NULL —
+        the *column* is access-restricted, not the row. ExecutablePath was not
+        shown to survive that restriction, and for a protected process it
+        commonly does not, so the executable column falls back to the bare
+        process name. That is still enough to prove an instance is up, which
+        is the only claim that has to hold: the guard this feeds asks "may I
+        launch?", and the answer must be no.
+        """
+        mode = self._mode(self._readers(powershell=(0, self._cim("", executable=""))))
+        self.assertTrue(mode["running"], "a row with only a name still proves Resolve is up")
+        self.assertEqual(mode["instances"], 1)
+        self.assertIsNone(mode["headless"], "-nogui lives only in the command line")
+
+    def test_wmic_is_still_preferred_where_it_exists(self) -> None:
+        """Machines that still have WMIC must be untouched by the fallback."""
+        run = self._readers(wmic=(0, '"%s"' % self.EXE),
+                            powershell=(0, self._cim('"%s" -nogui' % self.EXE)))
+        mode = self._mode(run)
+        self.assertTrue(mode["running"])
+        self.assertFalse(mode["headless"], "the WMIC answer must win, not PowerShell's")
+
+    def test_a_reader_that_runs_and_finds_nothing_ends_the_chain(self) -> None:
+        """An empty answer is an answer. Falling through to the next reader
+        would make "no Resolve running" cost every timeout in the chain."""
+        calls = []
+
+        def run(command, *args, **kwargs):
+            calls.append(command[0])
+            if command[0] == "wmic":
+                raise FileNotFoundError(2, "not found: wmic")
+            return mock.Mock(returncode=0, stdout="")
+
+        mode = self._mode(run)
+        self.assertTrue(mode["determinable"])
+        self.assertFalse(mode["running"])
+        self.assertEqual(mode["instances"], 0)
+        self.assertEqual(calls, ["wmic", "powershell"], "pwsh must not be reached")
+
+    def test_a_broken_reader_falls_through_to_the_next(self) -> None:
+        """Non-zero exit with nothing on stdout is a reader that did not work,
+        not a machine with no Resolve on it."""
+        run = self._readers(powershell=(1, ""), pwsh=(0, self._cim('"%s"' % self.EXE)))
+        mode = self._mode(run)
+        self.assertTrue(mode["running"])
+        self.assertEqual(mode["instances"], 1)
+
+    def test_no_reader_at_all_is_undeterminable_not_empty(self) -> None:
+        """The distinction the whole module is built on must survive the chain."""
+        mode = self._mode(self._readers())
+        self.assertFalse(mode["determinable"])
+        self.assertIsNone(mode["running"])
+        self.assertIsNone(mode["instances"])
+
+    def test_a_command_line_containing_tabs_keeps_its_arguments(self) -> None:
+        """The command line is the last column and may contain the separator,
+        so the split is bounded rather than greedy."""
+        rows = rr._windows_cim_rows('7	Resolve.exe	%s	"%s"	-nogui' % (self.EXE, self.EXE))
+        self.assertEqual(rows[0]["pid"], 7)
+        self.assertTrue(rows[0]["args"].endswith('	-nogui'))
+
+    def test_a_non_numeric_pid_does_not_lose_the_row(self) -> None:
+        """A header or a stray line must not raise; the row still carries its
+        columns, keyed by a synthetic pid the way the WMIC branch always has."""
+        rows = rr._windows_cim_rows("ProcessId	Name	ExecutablePath	CommandLine")
+        self.assertEqual(len(rows), 1)
+        self.assertLess(rows[0]["pid"], 0)
 
 
 if __name__ == "__main__":

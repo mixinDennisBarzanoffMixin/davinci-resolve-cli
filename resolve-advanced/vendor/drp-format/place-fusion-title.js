@@ -37,6 +37,13 @@ const {
 } = require('./seq-surgery');
 
 const TEMPLATE_PATH = path.join(__dirname, 'templates', 'fusion-title.xml');
+// Snippets are generation-bound like the project templates: an R21-harvested
+// clip imports on 19 and renders BLACK (measured 2026-08-30). r19 variant
+// harvested live from Studio 19.1.3.7.
+const TEMPLATE_PATH_R19 = path.join(__dirname, 'templates', 'fusion-title-r19.xml');
+function snippetPathFor(templateVersion) {
+  return (Number(templateVersion) || 21) >= 21 ? TEMPLATE_PATH : TEMPLATE_PATH_R19;
+}
 
 /**
  * Place a Fusion Title clip onto a chosen video track of a timeline in a .drp.
@@ -72,6 +79,7 @@ async function placeFusionTitle(drpInput, opts = {}) {
     color,
     timelineUuid,
     titleClipXml,
+    templateVersion,
   } = opts;
 
   if (!Number.isInteger(startFrame)) throw new TypeError('placeFusionTitle: startFrame (int) is required');
@@ -82,7 +90,7 @@ async function placeFusionTitle(drpInput, opts = {}) {
   let xml = seqXml;
 
   // Prepare the title clip (clone + rewrite identity/timing).
-  let clip = titleClipXml || fs.readFileSync(TEMPLATE_PATH, 'utf8');
+  let clip = titleClipXml || fs.readFileSync(snippetPathFor(templateVersion), 'utf8');
   clip = clip.trim();
   if (!/PrettyType>\s*Fusion Title/.test(clip)) {
     throw new Error('placeFusionTitle: template is not a Fusion Title clip');

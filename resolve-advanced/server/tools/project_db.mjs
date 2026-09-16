@@ -19,7 +19,17 @@
 
 import { z } from 'zod';
 import { createRequire } from 'node:module';
-import { resolveDbPath, openGuarded, backup, requireClosed } from '../db-patch.mjs';
+import { resolveDbPath as _resolveDbPathRaw, responsiveRoots, openGuarded, backup, requireClosed } from '../db-patch.mjs';
+
+// projectName discovery walks library roots that macOS can render UNRESPONSIVE
+// (measured: a hung Lite sandbox container froze every lookup). Probe the
+// roots with a deadline first and search only the ones that answer; the
+// not-found error then names any skipped root.
+async function resolveDbPath(p) {
+  if (p.projectDb || !p.projectName) return _resolveDbPathRaw(p);
+  const { roots, skipped } = await responsiveRoots();
+  return _resolveDbPathRaw({ ...p, roots, skippedRoots: skipped });
+}
 
 const require = createRequire(import.meta.url);
 
@@ -52,6 +62,8 @@ const relayoutSchema = z.object({
   originX: z.number().int().optional().describe('Clean-row start x (default 290 — matches native Cleanup Node Graph)'),
   originY: z.number().int().optional().describe('Clean-row y (default 428)'),
   spacingX: z.number().int().optional().describe('Clean-row x spacing (default 495)'),
+  spacingY: z.number().int().optional().describe('Lane pitch for stacked branches (default 178)'),
+  layout: z.enum(['topology', 'row']).optional().describe('topology (default) or row'),
   iConfirmProjectClosed: confirm,
 });
 
@@ -96,7 +108,7 @@ export const projectDbTool = {
   async handler({ action, args }) {
     if (action === 'list_folders') {
       const p = listFoldersSchema.parse(args);
-      const db = openGuarded(resolveDbPath(p), { table: 'Sm2MpFolder', column: 'Name' });
+      const db = openGuarded(await resolveDbPath(p), { table: 'Sm2MpFolder', column: 'Name' });
       try {
         return { folders: db.prepare('SELECT Name, ColorTag FROM Sm2MpFolder ORDER BY Name').all() };
       } finally {
@@ -106,7 +118,7 @@ export const projectDbTool = {
     if (action === 'rename_folder') {
       const p = renameFolderSchema.parse(args);
       requireClosed(p);
-      const dbPath = resolveDbPath(p);
+      const dbPath = await resolveDbPath(p);
       const bak = backup(dbPath);
       const db = openGuarded(dbPath, { writable: true, table: 'Sm2MpFolder', column: 'Name' });
       try {
@@ -121,7 +133,7 @@ export const projectDbTool = {
     if (action === 'set_folder_color') {
       const p = folderColorSchema.parse(args);
       requireClosed(p);
-      const dbPath = resolveDbPath(p);
+      const dbPath = await resolveDbPath(p);
       const bak = backup(dbPath);
       const db = openGuarded(dbPath, { writable: true, table: 'Sm2MpFolder', column: 'ColorTag' });
       try {
@@ -135,7 +147,7 @@ export const projectDbTool = {
     }
     if (action === 'list_clips') {
       const p = listClipsSchema.parse(args);
-      const db = openGuarded(resolveDbPath(p), { table: 'Sm2MpMedia', column: 'MarkIn' });
+      const db = openGuarded(await resolveDbPath(p), { table: 'Sm2MpMedia', column: 'MarkIn' });
       try {
         return { clips: db.prepare('SELECT Name, MarkIn, MarkOut FROM Sm2MpMedia ORDER BY Name LIMIT 500').all() };
       } finally {
@@ -146,7 +158,7 @@ export const projectDbTool = {
       const p = clipMarksSchema.parse(args);
       requireClosed(p);
       if (p.markIn == null && p.markOut == null) throw new Error('provide markIn and/or markOut');
-      const dbPath = resolveDbPath(p);
+      const dbPath = await resolveDbPath(p);
       const bak = backup(dbPath);
       const db = openGuarded(dbPath, { writable: true, table: 'Sm2MpMedia', column: 'MarkIn' });
       try {
@@ -162,8 +174,8 @@ export const projectDbTool = {
     if (action === 'relayout_node_graphs') {
       const p = relayoutSchema.parse(args);
       const layout = require('../../vendor/drx-codec/node-layout.js');
-      const layoutOpts = { originX: p.originX, originY: p.originY, spacingX: p.spacingX };
-      const dbPath = resolveDbPath(p);
+      const layoutOpts = { originX: p.originX, originY: p.originY, spacingX: p.spacingX, spacingY: p.spacingY, layout: p.layout };
+      const dbPath = await resolveDbPath(p);
       const write = !p.dryRun;
       if (write) requireClosed(p);
       const bak = write ? backup(dbPath) : null;
@@ -228,7 +240,7 @@ export const projectDbTool = {
     if (action === 'list_subtitle_styles') {
       const p = listSubtitleStylesSchema.parse(args);
       const style = require('../../vendor/drp-format/subtitle-style.js');
-      const db = openGuarded(resolveDbPath(p), { table: 'Sm2TiTrack', column: 'FieldsBlob' });
+      const db = openGuarded(await resolveDbPath(p), { table: 'Sm2TiTrack', column: 'FieldsBlob' });
       try {
         const counts = new Map();
         const tracks = [];
@@ -259,7 +271,7 @@ export const projectDbTool = {
         return {
           tracks,
           note: tracks.some((t) => t.styled === false)
-            ? 'Tracks with styled:false carry no style blob (Resolve writes a NumLayers-only stub until the track is styled once in the UI); set_subtitle_style cannot patch those.'
+            ? 'Tracks with styled:false carry no style blob (Resolve writes a NumLayers-only stub until the track is styled once in the UI); set_subtitle_style cannot patch those. This covers scripted routes too: a track built by MediaPool.ImportMedia(srt) + AppendToTimeline([srtClip]) reports styled:false (confirmed on Studio 21.0.4.5, issue #169), so style once in the UI regardless of how the track was created.'
             : undefined,
         };
       } finally {
@@ -281,7 +293,7 @@ export const projectDbTool = {
 
       const write = !p.dryRun;
       if (write) requireClosed(p);
-      const dbPath = resolveDbPath(p);
+      const dbPath = await resolveDbPath(p);
       const bak = write ? backup(dbPath) : null;
       const db = openGuarded(dbPath, { writable: write, table: 'Sm2TiTrack', column: 'FieldsBlob' });
       try {

@@ -60,7 +60,7 @@ class PythonCliToolParityTests(unittest.TestCase):
         registered = _mcp_tool_registry("compound")
         cli_registry = build_registry("compound")
 
-        self.assertEqual(len(registered), 36)
+        self.assertEqual(len(registered), 37)
         self.assertEqual(set(cli_registry), set(registered))
         # build_registry must expose the actual FastMCP Tool objects.  Sharing
         # them preserves validation, defaults, result conversion, and future
@@ -75,7 +75,7 @@ class PythonCliToolParityTests(unittest.TestCase):
         registered = _mcp_tool_registry("granular")
         cli_registry = build_registry("granular")
 
-        self.assertEqual(len(registered), 353)
+        self.assertEqual(len(registered), 389)
         self.assertEqual(set(cli_registry), set(registered))
         for name, tool in registered.items():
             self.assertIs(cli_registry[name], tool, name)
@@ -113,7 +113,7 @@ class PythonCliToolParityTests(unittest.TestCase):
                 self.assertEqual(descriptors[name].inputSchema, tool.parameters, name)
 
     def test_cli_tools_command_emits_every_registered_name(self):
-        for surface, count in (("compound", 36), ("granular", 353)):
+        for surface, count in (("compound", 37), ("granular", 389)):
             payload = _run_python_cli_json("--surface", surface, "tools")
             rows = payload["tools"]
             self.assertEqual(payload["count"], count)
@@ -390,7 +390,7 @@ class AdvancedCliParityTests(unittest.TestCase):
         self.assertTrue(payload["sameHandlers"])
         self.assertTrue(payload["mapMatches"])
         self.assertEqual(len(names), 19)
-        self.assertEqual(sum(len(row["actions"]) for row in rows), 163)
+        self.assertEqual(sum(len(row["actions"]) for row in rows), 168)
         self.assertEqual(len(names), len(set(names)), "duplicate advanced tool names")
         self.assertTrue(all(row["description"] for row in rows))
         self.assertTrue(all(row["actions"] for row in rows))

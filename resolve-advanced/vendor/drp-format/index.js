@@ -117,6 +117,8 @@ module.exports = {
 
   // Place a built-in generator (Solid Color, etc.) on a chosen video track.
   placeGenerator: require('./place-generator').placeGenerator,
+  solidColorEffectBlob: require('./place-generator').solidColorEffectBlob,
+  decodeSolidColorEffectBlob: require('./place-generator').decodeSolidColorEffectBlob,
 
   // Insert a cross-dissolve between two abutting clips (the one op the Resolve API can't do).
   placeTransition: require('./place-transition').placeTransition,
@@ -162,6 +164,7 @@ module.exports = {
 
   // Build a full importable timeline from a declarative spec (titles/generators/transitions).
   assembleTimeline: require('./assemble-timeline').assembleTimeline,
+  cutSourceIntoClips: require('./cut-media').cutSourceIntoClips,
 
   // Author a project with one media clip referencing an arbitrary h264 file, from scratch [P8].
   addMediaClip: require('./author-project').addMediaClip,

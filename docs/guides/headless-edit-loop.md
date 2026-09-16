@@ -14,6 +14,18 @@ the raw runs are in `docs/reference/evidence/`.
 `-nogui` — the flat round trip, the complex-cut round trip, and the moved-media
 relink. Choose a format on its properties, never on whether you have a UI.
 
+**Precondition first, though: headless requires external scripting to connect
+without the GUI.** That held everywhere it was measured here, but at least one
+field setup (Studio 21.0.4.5, scripting routed through an external bridge
+process — issue #172) boots `-nogui` into an instance that *never answers*
+`scriptapp('Resolve')`, and an unscriptable headless instance still holds the
+one-per-machine singleton, so the GUI cannot start either. Preflight in 30
+seconds before committing a loop to `-nogui`:
+`python scripts/resolve_headless.py run -- python -c "print('ok')"` — a clean
+`ok` proves boot-to-scriptable; a `FAILED: no scripting response` now cleans up
+the instance it started, and `stop --force` TERM/KILLs a wedged one (unclean:
+expect project locks and a slow next boot).
+
 **There is no single best format.** Three measurements pull in different
 directions, and the right choice depends on which one you are up against:
 
@@ -60,6 +72,21 @@ No error, no exception — `ImportTimelineFromFile` just returns None once the
 name is taken. An iterative loop that reuses one name works exactly once and
 then quietly does nothing, which is the worst possible failure for an automated
 edit cycle. Make the name unique per iteration.
+
+### A unique `timelineName` is still not enough — the file's internal name wins
+
+Resolve honours the sequence name **inside** the interchange file over the
+`timelineName` option (issue #171, measured on Studio 21.0.4.5). Export → edit
+→ re-import with `timelineName: CUT_v002` while the XML still says `CUT_v001`
+and Resolve hands back the **existing** `CUT_v001` timeline: the raw API
+reports the old timeline as if it were the import, and the loop operates on one
+timeline forever. When driving the raw API, bump the `<sequence><name>` inside
+the XML each iteration.
+
+`timeline.import_timeline_checked` handles both halves for you: it rewrites the
+FCP7 XML's internal sequence name to the requested `timelineName` before
+importing, and if a format it cannot rewrite still returns an existing timeline
+it errors instead of reporting success.
 
 ### DRT ignores `timelineName` and re-imports the media
 

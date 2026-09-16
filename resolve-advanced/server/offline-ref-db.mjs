@@ -31,15 +31,15 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+import { requireBetterSqlite3 } from './capabilities.mjs';
 
 const DISK_DB_ROOT = path.join(os.homedir(), 'Library/Application Support/Blackmagic Design/DaVinci Resolve/Resolve Disk Database/Resolve Projects');
+// Modern Studio installs keep the local library under "Resolve Project
+// Library" instead (issue #169) — same shape, different root name.
+const PROJECT_LIBRARY_ROOT = path.join(os.homedir(), 'Library/Application Support/Blackmagic Design/DaVinci Resolve/Resolve Project Library/Resolve Projects');
 
 function loadSqlite() {
-  try {
-    return require('better-sqlite3');
-  } catch {
-    throw new Error("offline_ref DB path needs the optional native dep 'better-sqlite3'. Install: npm i better-sqlite3");
-  }
+  return requireBetterSqlite3('The live offline-reference DB path');
 }
 
 /** Recursively locate <projectName>/Project.db under the Resolve Disk Database. */
@@ -86,8 +86,11 @@ function openDb(dbPath, writable) {
 function resolveDbPath({ projectDb, projectName }) {
   if (projectDb) return projectDb;
   if (!projectName) throw new Error('provide projectDb (path) or projectName');
-  const hits = findProjectDb(projectName);
-  if (!hits.length) throw new Error(`no Project.db found for project "${projectName}" under the Resolve Disk Database`);
+  const hits = [...new Set([
+    ...findProjectDb(projectName, DISK_DB_ROOT),
+    ...findProjectDb(projectName, PROJECT_LIBRARY_ROOT),
+  ])];
+  if (!hits.length) throw new Error(`no Project.db found for project "${projectName}" under ${DISK_DB_ROOT} or ${PROJECT_LIBRARY_ROOT}`);
   if (hits.length > 1) throw new Error(`multiple Project.db match "${projectName}": ${hits.join(', ')} — pass projectDb explicitly`);
   return hits[0];
 }

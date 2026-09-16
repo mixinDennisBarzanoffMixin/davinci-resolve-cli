@@ -20,7 +20,6 @@ import tempfile
 
 from src.utils.resolve_probe import has_method
 import time
-import types
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -101,43 +100,17 @@ EXTRA_TIMELINE_ITEM_METHODS = [
 
 
 def _install_mcp_stubs() -> None:
-    """Allow importing src.server when MCP deps are absent from Python 3.11."""
+    """Stand in for the MCP SDK only when it is genuinely absent.
 
-    class FastMCP:
-        def __init__(self, *args, **kwargs):
-            pass
+    Delegates to the shared installer so this harness cannot drift behind the
+    imports `src.server` actually makes; see `src/utils/mcp_import_stubs.py`.
+    """
+    repo_root = str(Path(__file__).resolve().parents[2])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from src.utils.mcp_import_stubs import install_mcp_stubs
 
-        def tool(self, *args, **kwargs):
-            def decorate(func):
-                return func
-
-            return decorate
-
-        def resource(self, *args, **kwargs):
-            def decorate(func):
-                return func
-
-            return decorate
-
-    def stdio_server(*args, **kwargs):
-        raise RuntimeError("stdio_server is not used by the live timeline kernel probe")
-
-    anyio = types.ModuleType("anyio")
-    anyio.run = lambda func: func()
-
-    mcp = types.ModuleType("mcp")
-    server = types.ModuleType("mcp.server")
-    fastmcp = types.ModuleType("mcp.server.fastmcp")
-    stdio = types.ModuleType("mcp.server.stdio")
-
-    fastmcp.FastMCP = FastMCP
-    stdio.stdio_server = stdio_server
-
-    sys.modules.setdefault("anyio", anyio)
-    sys.modules.setdefault("mcp", mcp)
-    sys.modules.setdefault("mcp.server", server)
-    sys.modules.setdefault("mcp.server.fastmcp", fastmcp)
-    sys.modules.setdefault("mcp.server.stdio", stdio)
+    install_mcp_stubs(stdio_note="stdio_server is not used by this live harness")
 
 
 def _require_success(label: str, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -947,7 +920,13 @@ def run_probe(server, output_dir: Path, keep_open: bool = False) -> Dict[str, An
         audio_item = server._find_timeline_item_by_id(timeline, audio_id)
         if not audio_item:
             raise AssertionError(f"Could not recover audio item: {audio_id}")
-        timeline.SetClipsLinked([source_item, audio_item], True)
+        # Everything the probe measures below assumes the pair is linked. A
+        # discarded False would measure UNLINKED behaviour and record it as
+        # linked behaviour.
+        if not timeline.SetClipsLinked([source_item, audio_item], True):
+            raise AssertionError(
+                "SetClipsLinked refused the source/audio pair; every linked-item "
+                "measurement below would be a reading of unlinked items")
 
         source_duration = _frame_int(source_item.GetDuration())
         metadata["source"] = {

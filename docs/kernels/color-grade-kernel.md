@@ -33,6 +33,7 @@ All actions are exposed through `timeline_item_color`.
 | `safe_set_cdl` | Validate and normalize CDL payloads before calling `SetCDL`; supports dry run. |
 | `safe_copy_grade` | Resolve target timeline item IDs before calling `CopyGrades`; supports dry run. |
 | `safe_apply_drx` | Validate DRX file existence and temp-path guard before calling `ApplyGradeFromDRX`. |
+| `apply_trace_plan` | Apply the advanced server's `color_trace` plan to the current timeline: resolve each entry to a live clip by (name, record start, duration), dry-run resolution table, one confirm_token for the batch, timeline archived first, then `ApplyGradeFromDRX` per clip; `version_name` adds a local version per clip so the previous grade survives. Unresolved entries are reported, never guessed; the full per-clip tables go to `report_path`, the response carries the summary, an `attention` list and the first `max_rows` rows. |
 | `safe_export_lut` | Resolve LUT export type aliases and require temp output paths by default. |
 | `grade_version_snapshot` | Read current, local, and remote grade version names. |
 | `grade_version_restore` | Safely load a named local/remote version after verifying it exists. |
@@ -114,7 +115,8 @@ The live actions above drive a *running* Resolve. The companion advanced server
 (`davinci-resolve-advanced`, see `resolve-advanced/README.md`) *computes* grades
 offline from extracted frames and reads/writes `.drx`/`.drp` grades with **no
 Resolve running**. It emits an apply-ready `.drx`; **applying it is this kernel's
-job** (`safe_apply_drx`). Node never drives Resolve.
+job** (`safe_apply_drx` for one clip, `apply_trace_plan` for a whole `color_trace`
+plan). Node never drives Resolve.
 
 `drx` grading/QC actions (frame-stats → arithmetic → `.drx`, all local,
 deterministic, guarded — they refuse to fabricate a match rather than emit a
@@ -153,10 +155,13 @@ Cross-server rules an agent must know:
   `drx(action="relayout")` → `graph.reset_all_grades` → `safe_apply_drx` with
   explicit indices (a same-structure apply keeps the OLD layout — the reset is
   required). Whole project, offline: `project_db(action="relayout_node_graphs")`.
+  Any scope, open project: export → `drp(action="relayout_node_graphs")` (every
+  version of every clip + group/timeline graphs; dry-run, read-back verify) →
+  import as a sibling → re-export the sibling and dry-run again.
 - **Deps.** The grading catalog needs `sharp`; call the advanced `capabilities`
   tool for live status and install hints.
 
-See the `resolve-color` skill (`.claude/skills/resolve-color/SKILL.md`) for the
+See the `resolve-color` skill (`.agents/skills/resolve-color/SKILL.md`) for the
 craft ↔ live ↔ offline routing and the frame-first rule.
 
 ## Live Probe
