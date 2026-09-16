@@ -66,8 +66,8 @@ semantics.
 - Public overview, current stats, and docs map: `README.md`
 - Historical release notes: `CHANGELOG.md`
 - AI assistant operating reference: `docs/SKILL.md`
-- Craft guidance for non-Claude-Code clients: the `knowledge` tool serves
-  `.claude/skills/`, `docs/guides/`, and `docs/kernels/` as resolved prose over
+- Craft guidance for remote clients: the `knowledge` tool serves
+  `.agents/skills/`, `docs/guides/`, and `docs/kernels/` as resolved prose over
   MCP. When you add a skill, guide, or kernel it is indexed automatically — a
   drift guard fails the suite if anything in those directories is unreachable
 - Release checklist and validation rules: `docs/process/release-process.md`
@@ -78,12 +78,21 @@ semantics.
   limitation, add a `submit`-tagged entry to `src/utils/api_truth.py` and
   regenerate with `scripts/gen_api_limitations.py` (a drift guard enforces it)
 - Bundled Resolve API text: `docs/reference/resolve_scripting_api.txt` — refresh
-  it by copying the shipped `Developer/Scripting/README.txt` over it wholesale,
-  never by hand-adding the lines you already know about. The file's only value
-  is that a diff against it is trustworthy; a hand-patch carries a newer
-  `Last Updated:` header while still hiding everything you did not know to look
-  for. That is exactly how it sat eight weeks stale at 26 May 2026 while ten
-  documented 21.0.4 methods went unwired (PR #139)
+  it by copying the shipped scripting README over it wholesale, never by
+  hand-adding the lines you already know about. The file's only value is that a
+  diff against it is trustworthy; a hand-patch carries a newer `Last Updated:`
+  header while still hiding everything you did not know to look for. That is
+  exactly how it sat eight weeks stale at 26 May 2026 while ten documented
+  21.0.4 methods went unwired (PR #139).
+  **The shipped README moved in 21.1.** `Developer/Scripting/README.txt` is
+  gone; the pack is now `README.md`, a typed `DaVinciResolveScript.pyi` (the
+  full signature surface, which the old README never carried) and a
+  `CHANGELOG.md` of per-version additions. Copying `README.md` over the bundled
+  file is still the right refresh, but it renumbers every line — and
+  `scripts/audit_api_parity.py`, `tests/test_resolve_bridge.py` and a few dozen
+  `resolve_scripting_api.txt line N` comments in `src/` read it. Re-run the
+  parity audit and re-anchor those comments in the same change, or leave the
+  file at its 21.0 revision and cite the `.pyi` for new work
 
 ## Key Paths
 
@@ -95,6 +104,12 @@ semantics.
 - Installer: `install.py`
 - Tests: `tests/`
 - Examples: `examples/`
+- Portable agent assets: `.agents/skills/`, `.agents/roles/`, `.agents/hooks/`
+- Client adapters: `.claude/` and `.codex/`. Skills are byte-identical in
+  `.claude/skills/` (edit either copy, then run
+  `scripts/agent-rules/sync_portable_assets.py`); hooks are canonical in
+  `.agents/hooks/` with thin shims; `.claude/agents/*` keep their frontmatter
+  (tools/model pins) over the shared `.agents/roles/*` bodies
 
 ## Common Commands
 
@@ -130,8 +145,10 @@ for Resolve scripting; 3.13/3.14 are accepted and verified on Resolve Studio
 Per-domain routers pair the live tools with their offline (advanced-server)
 counterparts. Every domain is available on demand in ANY MCP client as a slash
 prompt (`/color_grade_workflow`, `/timeline_edit_workflow`, `/conform_workflow`,
-`/delivery_workflow`, `/analyze_media`) and, in Claude Code, as a `.claude/skills/`
-skill. Full per-action depth lives in `docs/kernels/`.
+`/delivery_workflow`, `/analyze_media`) and as canonical skills in
+`.agents/skills/` (Claude Code loads content-complete `.claude/skills/` copies
+kept byte-identical by `scripts/agent-rules/sync_portable_assets.py` and its
+parity guard). Full per-action depth lives in `docs/kernels/`.
 
 - **Color / Grade** (`/color_grade_workflow`, skill `resolve-color`) — grading, correcting, shot matching, developing looks, or applying/modifying LUTs, CDLs, DRX grades, or copied grades. Live: timeline_item_color. Offline: drx. Depth: docs/kernels/color-grade-kernel.md + docs/guides/color-decision-guide.md.
 - **Timeline Edit** (`/timeline_edit_workflow`, skill `resolve-edit`) — cutting, trimming, pacing, duplicating/moving clips, copying ranges, building variants, tightening a cut, or generating an editorial changelist. Live: timeline. Offline: editorial. Depth: docs/kernels/timeline-edit-kernel.md + docs/guides/editorial-decision-guide.md.

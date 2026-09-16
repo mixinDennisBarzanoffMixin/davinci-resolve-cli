@@ -17,6 +17,7 @@ Run with ``--check`` to fail (exit 1) when the committed doc is stale.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -122,10 +123,23 @@ def render() -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="fail if the committed report is out of date",
+    )
+    return parser.parse_args(argv)
+
+
 def main(argv: list[str]) -> int:
+    if argv is None:
+        raise TypeError("argv must not be None")
+    args = _parse_args(argv)
     content = render()
-    if "--check" in argv:
-        current = DOC_PATH.read_text() if DOC_PATH.exists() else ""
+    if args.check:
+        current = DOC_PATH.read_text(encoding="utf-8") if DOC_PATH.exists() else ""
         if current != content:
             print(
                 f"STALE: {DOC_PATH.relative_to(REPO_ROOT)} is out of date.\n"
@@ -135,7 +149,7 @@ def main(argv: list[str]) -> int:
             return 1
         print(f"OK: {DOC_PATH.relative_to(REPO_ROOT)} is up to date.")
         return 0
-    DOC_PATH.write_text(content)
+    DOC_PATH.write_text(content, encoding="utf-8")
     print(f"Wrote {DOC_PATH.relative_to(REPO_ROOT)}")
     return 0
 

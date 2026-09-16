@@ -137,7 +137,7 @@ class TestAuthoring(unittest.TestCase):
     def test_otio_round_trips_through_our_own_parser(self):
         """Writing a file and Resolve honouring it are different claims; this is the first."""
         result = self._author("otio")
-        document = json.loads(pathlib.Path(result["output_path"]).read_text())
+        document = json.loads(pathlib.Path(result["output_path"]).read_text(encoding="utf-8"))
         self.assertEqual(document["OTIO_SCHEMA"].split(".")[0], "Timeline")
         clips = [
             child for track in document["tracks"]["children"]
@@ -153,7 +153,7 @@ class TestAuthoring(unittest.TestCase):
     def test_source_frames_are_timecode_absolute(self):
         """A source_range measured from zero imports as an EMPTY timeline in Resolve."""
         result = self._author("otio")
-        document = json.loads(pathlib.Path(result["output_path"]).read_text())
+        document = json.loads(pathlib.Path(result["output_path"]).read_text(encoding="utf-8"))
         clip = next(
             child for track in document["tracks"]["children"]
             for child in track["children"]
@@ -190,7 +190,7 @@ class TestAuthoring(unittest.TestCase):
         otio = offline_fallback.author(
             clips, os.path.join(self.dir, "keep.otio"), target="otio", fps=24)
         self.assertEqual([w["id"] for w in otio["warnings"]], [])
-        self.assertIn("LinearTimeWarp", pathlib.Path(otio["output_path"]).read_text())
+        self.assertIn("LinearTimeWarp", pathlib.Path(otio["output_path"]).read_text(encoding="utf-8"))
 
     def test_drt_names_the_resolve_version_it_targets(self):
         result = self._author("drt")
@@ -216,7 +216,7 @@ class TestAuthoring(unittest.TestCase):
 
     def test_edl_carries_the_record_timecode(self):
         result = self._author("edl")
-        text = pathlib.Path(result["output_path"]).read_text()
+        text = pathlib.Path(result["output_path"]).read_text(encoding="utf-8")
         self.assertIn("TITLE: Test", text)
         self.assertIn("00:00:00:00", text)
 
@@ -245,6 +245,35 @@ class TestBridgeScript(unittest.TestCase):
             {"events": [{"source": "/a.mov"}], "target": "aaf", "outputPath": "/tmp/x"})
         self.assertNotEqual(code, 0)
         self.assertIn("aaf", result["error"])
+
+
+class TestDynamicImportsTakeFileUrls(unittest.TestCase):
+    """A path handed to import() works on macOS and Linux and fails on Windows.
+
+    Node reads `C:\\...` as a URL whose scheme is `c:` and throws
+    ERR_UNSUPPORTED_ESM_URL_SCHEME, so every offline authoring call errored on Windows
+    while CI, which only runs Linux, stayed green. The launcher hit this first (06d5bd6);
+    the authoring bridge repeated it. Checked statically because no Linux run can see it.
+    """
+
+    def test_no_dynamic_import_is_given_a_bare_path(self):
+        import re
+
+        call = re.compile(r"\bimport\(\s*([^'\"`\s])")
+        offenders = []
+        # The advanced server loads its own modules with import() too, including from
+        # its tools/ subfolder, so that tree is walked recursively.
+        for folder, pattern in (("scripts", "*.mjs"), ("bin", "*.mjs"),
+                                ("resolve-advanced/server", "**/*.mjs")):
+            for script in sorted((REPO_ROOT / folder).glob(pattern)):
+                if "node_modules" in script.parts:
+                    continue
+                text = script.read_text(encoding="utf-8")
+                for match in call.finditer(text):
+                    if not text[match.start(1):].startswith("pathToFileURL("):
+                        line = text.count("\n", 0, match.start()) + 1
+                        offenders.append(f"{script.relative_to(REPO_ROOT).as_posix()}:{line}")
+        self.assertEqual(offenders, [], "wrap the path in pathToFileURL(...).href")
 
 
 class TestOffer(unittest.TestCase):

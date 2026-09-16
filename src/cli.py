@@ -27,9 +27,38 @@ EXIT_USAGE = 2
 EXIT_INTERNAL = 3
 EXIT_INTERRUPTED = 130
 
-VERSION = "2.103.2"
+VERSION = "4.7.6"
 SURFACES = ("compound", "granular")
 OUTPUTS = ("json", "jsonl", "raw", "shell")
+
+# Registry metadata and help text intentionally contain Unicode punctuation.
+# A redirected Windows console commonly exposes cp1252 even though callers
+# expect UTF-8 JSON.  Make command output deterministic and, more importantly,
+# do not let a successful command fail while writing its result.
+_OUTPUT_GLYPH_PROBE = "→—✓⊘•"
+
+
+def _ensure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        encoding = getattr(stream, "encoding", None)
+        if reconfigure is None or not encoding:
+            continue
+        try:
+            _OUTPUT_GLYPH_PROBE.encode(encoding)
+            continue
+        except (LookupError, UnicodeEncodeError):
+            pass
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            try:
+                reconfigure(errors="replace")
+            except Exception:
+                pass
+
+
+_ensure_utf8_stdio()
 
 
 class CliUsageError(ValueError):

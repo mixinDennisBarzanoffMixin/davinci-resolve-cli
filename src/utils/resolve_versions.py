@@ -104,7 +104,9 @@ def at_least(live: Any, required: Any) -> Optional[bool]:
 #
 #   measured   — probed live by this project
 #   reported   — a user's live probe, credited, not independently reproduced
-#   vendor     — stated by Blackmagic's shipped Developer/Scripting/README.txt
+#   vendor     — stated by Blackmagic's shipped Developer/Scripting docs
+#                (README.txt through 21.0; README.md, CHANGELOG.md and
+#                DaVinciResolveScript.pyi from 21.1 on)
 #   documented — a floor this server already enforces at the call site, taken
 #                from Blackmagic's release documentation. See CODE_FLOORS.
 
@@ -117,6 +119,23 @@ _EVIDENCE_GATES: List[Dict[str, Any]] = [
                 "Fairlight gap is the whole story, because the whole-mix preset "
                 "workaround is unavailable.",
         "issue": 128,
+    },
+    {
+        "symbol": "MediaPoolItem.GetMarkInOut",
+        "introduced_in": "19.1",
+        "source": "measured",
+        "note": "Present on Studio 19.1.3.7 (confirmed live 2026-08-29, "
+                "set/get round trip). Introduction version not bisected — "
+                "19.1 is the highest floor this repo can attest, so older "
+                "builds may have it too and the gate errs toward refusing.",
+    },
+    {
+        "symbol": "TimelineItem.GetLinkedItems",
+        "introduced_in": "19.1",
+        "source": "measured",
+        "note": "Present on Studio 19.1.3.7 (confirmed live 2026-08-29, "
+                "returned the audio twin of a video item). Introduction "
+                "version not bisected — same caveat as GetMarkInOut.",
     },
     {
         # Named on Project, not Timeline: the shipped README lists it in the
@@ -145,6 +164,18 @@ _EVIDENCE_GATES: List[Dict[str, Any]] = [
         "source": "reported",
         "note": "Reported against 21.0.4.5. Not reachable through this server yet.",
         "issue": 131,
+    },
+    {
+        "symbol": "MediaPoolItem.GetTranscription",
+        "introduced_in": "21.1",
+        "source": "reported",
+        "note": "Reported against Studio 21.1.0.14 (PR #199): the untruncated "
+                "transcript, {language, segments[{start, end, text, speaker, "
+                "words[]}]} in SOURCE timecode. media_pool_item get_transcription "
+                "prefers it when present and falls back to the truncated "
+                "'Transcription' clip property below 21.1; `source` in the "
+                "result says which route ran.",
+        "issue": 199,
     },
     {
         "symbol": "Project.SetRenderSettings UseFullExtents",
@@ -194,6 +225,36 @@ _EVIDENCE_GATES: List[Dict[str, Any]] = [
 # disagree, which is what keeps the two from drifting apart again.
 
 CODE_FLOORS: Dict[str, str] = {
+    "Timeline.AutoAlignClips": "21.1",
+    "Resolve.ValidateDCTL": "21.1",
+
+    "Resolve.EncryptDCTL": "21.1",
+    "MediaPool.CreateMulticamClip": "21.1",
+    "TimelineItem.FlattenMulticam": "21.1",
+    "Timeline.SetOutputBlanking": "21.1",
+    "TimelineItem.SetOutputBlanking": "21.1",
+    "TimelineItem.SetUseTimelineForOutputBlanking": "21.1",
+
+    "Timeline.NormalizeAudioLevel": "21.1",
+    "TimelineItem.AddTransition": "21.1",
+    "TimelineItem.SetSpeed": "21.1",
+    "TimelineItem.SetFades": "21.1",
+    # Documented in the shipped 21.1 scripting CHANGELOG; read-only contributor
+    # validation on Studio 21.1.0.14. No claim of a live older-build bisect.
+    "Resolve.GetKeyboardPresetList": "21.1",
+    "Resolve.GetCurrentKeyboardPreset": "21.1",
+    "Project.GetProjectSettingsPresetList": "21.1",
+    "Project.GetAudioRenderFormats": "21.1",
+    "Project.GetAudioRenderCodecs": "21.1",
+    "Timeline.GetNormalizeAudioModes": "21.1",
+    "Timeline.GetOutputBlanking": "21.1",
+    "TimelineItem.GetSpeed": "21.1",
+    "TimelineItem.GetFades": "21.1",
+    "MediaPoolItem.GetTranscription": "21.1",
+    "TimelineItem.GetType": "21.1",
+    "TimelineItem.GetOutputBlanking": "21.1",
+    "TimelineItem.GetUseTimelineForOutputBlanking": "21.1",
+
     "MediaPoolItem.LinkProxyMedia": "17.0",
     "MediaPoolItem.LinkFullResolutionMedia": "20.0",
     "MediaPoolItem.MonitorGrowingFile": "20.0",

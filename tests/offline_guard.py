@@ -23,6 +23,7 @@ hollowing out the tests that call it on purpose.
 from __future__ import annotations
 
 import os
+import tempfile
 
 #: Every launch the suite attempted, so a failure names the test rather than
 #: leaving an application open with no explanation.
@@ -31,6 +32,10 @@ LAUNCH_ATTEMPTS: list = []
 #: Set on `src.server` once the swap is in place, so a second install is a no-op
 #: rather than a stub-wrapping-a-stub.
 _INSTALLED_FLAG = "_offline_guard_installed"
+
+#: Mirrors `src.server._MEDIA_ANALYSIS_PREFS_ENV`. Named here rather than
+#: imported so installing the guard cannot depend on importing the server.
+_PREFS_ENV = "DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS"
 
 #: The originals, kept for `uninstall`.
 _originals: dict = {}
@@ -123,8 +128,150 @@ def install() -> bool:
     server._launch_resolve = blocked_launch
     server.get_resolve = offline_get_resolve
     server.resolve_is_running = offline_resolve_is_running
+
+    _redirect_security_audit_log()
+    _redirect_operation_log()
+    _redirect_media_analysis_preferences()
+
     setattr(server, _INSTALLED_FLAG, True)
     return True
+
+
+def _redirect_security_audit_log() -> None:
+    """Send destructive-op audit records to a temp file for the duration.
+
+    The audit log defaults to `logs/security-audit.jsonl` under the repo, which
+    is the right default for a real install and the wrong one for a test run:
+    exercising a `@destructive_op`-wrapped handler appends a genuine-looking
+    record. `test_tool_argument_validation` walks every tool, so one suite run
+    wrote 24 fabricated `delete_timelines` / `reset_all_grades` / `apply_cuts`
+    events into the operator's trail, and repeated runs accumulated 216.
+
+    A security log is read to answer "what actually happened here", so synthetic
+    entries in it are worse than a missing feature — they are indistinguishable
+    from real ones at the point someone needs to trust the file. Redirected
+    centrally rather than per test, because the next test to wrap a destructive
+    handler would otherwise reintroduce it.
+    """
+    try:
+        from src.utils import destructive_hook
+    except Exception:
+        return
+
+    original = destructive_hook._audit_log_path
+    _originals["_audit_log_path"] = original
+    handle = tempfile.NamedTemporaryFile(
+        prefix="security-audit-test-", suffix=".jsonl", delete=False
+    )
+    handle.close()
+    _originals["_audit_log_tempfile"] = handle.name
+
+    def audit_log_path_offline() -> str:
+        # Only the *default* is replaced. A test that configures
+        # `destructive.audit_log_path` — the audit tests do, to read back what
+        # they wrote — must still get its own path, or this guard would break
+        # the tests covering the feature it is protecting.
+        if destructive_hook._read_preference("destructive.audit_log_path", None):
+            return original()
+        return handle.name
+
+    destructive_hook._audit_log_path = audit_log_path_offline
+
+
+def _redirect_operation_log() -> None:
+    """Send synthetic mutating-operation records to a temp file during tests."""
+    try:
+        from src.utils import operation_log
+    except Exception:
+        return
+
+    original = operation_log.operation_log_path
+    _originals["operation_log_path"] = original
+    handle = tempfile.NamedTemporaryFile(
+        prefix="operation-log-test-", suffix=".jsonl", delete=False
+    )
+    handle.close()
+    _originals["operation_log_tempfile"] = handle.name
+
+    def operation_log_path_offline() -> str:
+        if operation_log._read_preference("destructive.operation_log_path", None):
+            return original()
+        return handle.name
+
+    operation_log.operation_log_path = operation_log_path_offline
+
+
+def _redirect_media_analysis_preferences() -> None:
+    """Point setup's persisted defaults at a temp file for the duration.
+
+    `logs/media-analysis-preferences.json` holds the operator's real `setup`
+    defaults, including `destructive.safe_mode`. Tests that call `setup` already
+    override the path, but the other three thousand read it, so a preference
+    saved on disk decided what the suite did: with `safe_mode` true, seventeen
+    tests across `test_cut_executor`, `test_keyed_param_guards` and
+    `test_media_pool_delete_governance` failed with
+    "Safe mode blocked critical-risk action" — a red suite caused by a setting,
+    not by the code under test.
+
+    A suite whose verdict depends on the developer's saved preferences is not
+    reporting on the code. Redirected here so it holds for every entry point.
+    """
+    env = os.environ.get(_PREFS_ENV)
+    if env:
+        return  # An outer harness already chose a path; don't fight it.
+    handle = tempfile.NamedTemporaryFile(
+        prefix="media-analysis-preferences-test-", suffix=".json", delete=False
+    )
+    handle.write(b"{}")
+    handle.close()
+    _originals["_prefs_env_tempfile"] = handle.name
+    os.environ[_PREFS_ENV] = handle.name
+
+
+def _restore_media_analysis_preferences() -> None:
+    path = _originals.pop("_prefs_env_tempfile", None)
+    if not path:
+        return
+    os.environ.pop(_PREFS_ENV, None)
+    if os.path.exists(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _restore_security_audit_log() -> None:
+    if "_audit_log_path" not in _originals:
+        return
+    try:
+        from src.utils import destructive_hook
+
+        destructive_hook._audit_log_path = _originals.pop("_audit_log_path")
+    except Exception:
+        _originals.pop("_audit_log_path", None)
+    path = _originals.pop("_audit_log_tempfile", None)
+    if path and os.path.exists(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _restore_operation_log() -> None:
+    if "operation_log_path" not in _originals:
+        return
+    try:
+        from src.utils import operation_log
+
+        operation_log.operation_log_path = _originals.pop("operation_log_path")
+    except Exception:
+        _originals.pop("operation_log_path", None)
+    path = _originals.pop("operation_log_tempfile", None)
+    if path and os.path.exists(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def uninstall() -> None:
@@ -138,6 +285,9 @@ def uninstall() -> None:
     server._launch_resolve = _originals["_launch_resolve"]
     server.get_resolve = _originals["get_resolve"]
     server.resolve_is_running = _originals["resolve_is_running"]
+    _restore_security_audit_log()
+    _restore_operation_log()
+    _restore_media_analysis_preferences()
     setattr(server, _INSTALLED_FLAG, False)
 
 

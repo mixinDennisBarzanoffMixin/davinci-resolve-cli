@@ -88,7 +88,7 @@ class TestResolution(unittest.TestCase):
         """`resolve-color` points at the colour decision guide; the guide must arrive."""
         resolved = knowledge.get("resolve-color")
         self.assertIn("docs/guides/color-decision-guide.md", resolved["inlined"])
-        guide_body = (knowledge.REPO_ROOT / "docs/guides/color-decision-guide.md").read_text()
+        guide_body = (knowledge.REPO_ROOT / "docs/guides/color-decision-guide.md").read_text(encoding="utf-8")
         # A distinctive line from the guide, not the path that pointed at it.
         sample = [line for line in guide_body.splitlines() if line.startswith("## ")][0]
         self.assertIn(sample.lstrip("# ").strip(), resolved["content"])
@@ -101,7 +101,7 @@ class TestResolution(unittest.TestCase):
         for reference in first_level:
             path = knowledge.REPO_ROOT / reference
             if path.is_file():
-                second_level |= set(knowledge._doc_references(path.read_text()))
+                second_level |= set(knowledge._doc_references(path.read_text(encoding="utf-8")))
         for reference in second_level - first_level:
             self.assertNotIn(
                 f"_Source: `{reference}`_", resolved,
@@ -126,7 +126,7 @@ class TestResolution(unittest.TestCase):
         self.assertIn("summarised here rather than inlined", resolved)
         self.assertIn('get(topic="mcp-operating-reference")', resolved)
 
-    def test_client_scaffolding_is_stripped_from_the_title(self):
+    def test_canonical_titles_are_client_neutral(self):
         for record in knowledge.index().values():
             with self.subTest(topic=record["topic"]):
                 self.assertNotIn("Claude Code Skill", record["title"])

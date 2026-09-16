@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import subprocess
 from typing import Any, Dict, List, Optional
 
@@ -57,40 +58,189 @@ MACOS_RESOLVE_APPS = (
 )
 
 
-def _process_lines() -> Optional[List[str]]:
-    """Every running command line, or None when that cannot be determined.
+_PID_PREFIX = re.compile(r"^\s*(\d+)\s+(.*)$")
 
-    None rather than an empty list on failure: an unanswerable question must not
-    become "nothing is running", which is the answer that leads to launching a
-    second instance on top of a live one.
+
+def _run_ps(columns: str) -> Optional[List[str]]:
+    """`ps -Awwo <columns>` as lines, or None when it cannot be run.
+
+    `-ww` on purpose: without it BSD ps may cut long command lines to the
+    terminal width, and a cut line no longer ends in the executable. Not
+    reproduced here (the Resolve path is 70 characters), but the second-
+    instance guard should not depend on where a launch argument happens to
+    fall relative to a column limit.
     """
     try:
-        if platform.system().lower() == "windows":
-            # `tasklist` prints no command line, so the flag is invisible there.
-            # WMIC does print it and is what makes headless detection possible.
-            #
-            # Decoded explicitly: `text=True` alone decodes with the locale
-            # codepage, which raises UnicodeDecodeError on a byte cp1252 has no
-            # mapping for — and this read is the input to the second-instance
-            # guard, so it must fail to "cannot tell", never to an exception.
-            # ASCII is byte-identical under both codecs, so the matching this
-            # feeds is unchanged; what WMIC emits for a non-ASCII install path
-            # on a non-English Windows is not something we can verify here.
-            out = subprocess.run(
-                ["wmic", "process", "where", "name='Resolve.exe'", "get", "CommandLine"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=10, check=False,
-            )
-        else:
-            out = subprocess.run(
-                ["ps", "-Ao", "command="], capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=10, check=False,
-            )
-        if out.returncode != 0 and not out.stdout:
-            return None
-        return (out.stdout or "").splitlines()
+        out = subprocess.run(
+            ["ps", "-Awwo", columns], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10, check=False,
+        )
     except Exception:  # pragma: no cover - defensive; an unknown answer is None
         return None
+    if out.returncode != 0 and not out.stdout:
+        return None
+    return (out.stdout or "").splitlines()
+
+
+def _split_pid(line: str, index: int):
+    """(pid, field) for a `pid=,<col>=` row; a row with no pid gets a synthetic one.
+
+    The synthetic pid is the row index, so two column listings of the same
+    length join row-by-row. That is what keeps a fake process table written as
+    bare command lines (the shape every existing test uses) meaningful: it is
+    read as both the executable column and the argv column of one process.
+    """
+    match = _PID_PREFIX.match(line)
+    if match:
+        return int(match.group(1)), match.group(2)
+    return -(index + 1), line
+
+
+def _windows_wmic_rows(stdout: str) -> List[Dict[str, Optional[str]]]:
+    """WMIC prints one command line per row, under a `CommandLine` header.
+
+    The header row and WMIC's blank padding rows are left in rather than
+    filtered: they are not Resolve command lines, so the executable match
+    drops them, and a second filter here would be a second place for that
+    decision to drift. There is no pid column to read, so pids are synthetic
+    and negative — they exist only to key the row, never to name a process.
+    """
+    return [{"pid": -(index + 1), "comm": None, "args": line}
+            for index, line in enumerate(stdout.splitlines())]
+
+
+def _windows_cim_rows(stdout: str) -> List[Dict[str, Optional[str]]]:
+    """`ProcessId`, `ExecutablePath` and `CommandLine`, tab-separated per row.
+
+    Four columns rather than the command line alone, because they fail
+    independently exactly as they do on POSIX. Measured on build 26200 by the
+    reporter of #210, querying as an unelevated user: for a process the caller
+    cannot fully read, CIM still returns the row with `ProcessId` and `Name`
+    populated and `CommandLine` NULL — the *column* is access-restricted, not
+    the row. Reading only the command line would turn such an instance into no
+    row at all: an empty list, which does not mean "undeterminable", it means
+    "nothing is running", and that is the answer that launches a second
+    Resolve on top of a live one.
+
+    `Name` rather than `ExecutablePath` alone is the reason this holds. That
+    measurement showed `Name` surviving the access restriction; it did not
+    show `ExecutablePath` surviving it, and for a protected process that field
+    is commonly empty too. So the executable column falls back to the bare
+    process name, which `RESOLVE_PROCESS_PATTERNS` already matches — enough to
+    prove an instance is up, while the mode stays honestly unknown, since
+    `-nogui` is only ever visible in the command line.
+
+    Split at most three times: a command line may itself contain tabs, and it
+    is the last field, so everything after the third separator belongs to it.
+    """
+    rows: List[Dict[str, Optional[str]]] = []
+    for index, line in enumerate(stdout.splitlines()):
+        if not line.strip():
+            continue
+        fields = line.split("\t", 3)
+        fields += [""] * (4 - len(fields))
+        try:
+            pid = int(fields[0].strip())
+        except ValueError:
+            pid = -(index + 1)
+        rows.append({"pid": pid,
+                     "comm": fields[2].strip() or fields[1].strip() or None,
+                     "args": fields[3].strip() or None})
+    return rows
+
+
+#: PowerShell equivalent of the WMIC query, emitting the four columns above.
+#: The output encoding is forced because the default console codepage mangles
+#: a non-ASCII install path before Python ever sees it.
+_CIM_COMMAND = (
+    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+    "Get-CimInstance Win32_Process -Filter \"name='Resolve.exe'\" | "
+    "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)`t$($_.ExecutablePath)`t$($_.CommandLine)\" }"
+)
+
+#: Readers for the Windows process table, tried in order until one answers.
+#:
+#: WMIC first, so a machine that still has it behaves exactly as it did before
+#: — but **WMIC was removed in Windows 11 build 26200** and is neither on PATH
+#: nor at its old System32\wbem location, so on current Windows it raises
+#: FileNotFoundError and every tool refused with "Resolve is not running"
+#: while Resolve sat in front of the user (#210). Keeping the old reader first
+#: costs nothing precisely because absence fails instantly rather than burning
+#: the timeout. Windows PowerShell 5.1 ships with Windows; `pwsh` is the
+#: cross-platform 7.x binary, tried last for a machine that has only that one.
+#:
+#: `None` is returned only when NO reader ran. A reader that ran and found
+#: nothing returns an empty list, which is a different answer.
+WINDOWS_PROCESS_READERS = (
+    (["wmic", "process", "where", "name='Resolve.exe'", "get", "CommandLine"],
+     _windows_wmic_rows),
+    (["powershell", "-NoProfile", "-NonInteractive", "-Command", _CIM_COMMAND],
+     _windows_cim_rows),
+    (["pwsh", "-NoProfile", "-NonInteractive", "-Command", _CIM_COMMAND],
+     _windows_cim_rows),
+)
+
+
+def _process_table() -> Optional[List[Dict[str, Optional[str]]]]:
+    """One row per process: `{pid, comm, args}`, or None when undeterminable.
+
+    Two columns because they fail independently. `args` is the argument
+    vector, the only place `-nogui` is visible — but the kernel refuses to
+    expose it for some processes (ps prints `(Resolve)` in parentheses) and a
+    launch argument after the path breaks a suffix match on it. `comm` is the
+    executable path as the kernel knows it — on macOS the full path — and it
+    is readable whenever the process is. An instance is counted on EITHER;
+    the mode is read from argv when argv is readable.
+
+    None rather than an empty list on failure: an unanswerable question must
+    not become "nothing is running", which is the answer that leads to
+    launching a second instance on top of a live one.
+    """
+    if platform.system().lower() == "windows":
+        # `tasklist` prints no command line, so the flag is invisible there.
+        # The readers below do print it, which is what makes headless
+        # detection possible on Windows at all.
+        #
+        # Decoded explicitly: `text=True` alone decodes with the locale
+        # codepage, which raises UnicodeDecodeError on a byte cp1252 has no
+        # mapping for — and this read is the input to the second-instance
+        # guard, so it must fail to "cannot tell", never to an exception.
+        # ASCII is byte-identical under both codecs, so the matching this
+        # feeds is unchanged; what these readers emit for a non-ASCII install
+        # path on a non-English Windows is not something we can verify here.
+        for reader, parse in WINDOWS_PROCESS_READERS:
+            try:
+                out = subprocess.run(
+                    reader, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=10, check=False,
+                )
+            except Exception:
+                continue  # this reader is unusable here; try the next one
+            if out.returncode != 0 and not (out.stdout or "").strip():
+                continue
+            return parse(out.stdout or "")
+        return None
+
+    comm_lines = _run_ps("pid=,comm=")
+    args_lines = _run_ps("pid=,args=")
+    if comm_lines is None and args_lines is None:
+        return None
+    rows: Dict[int, Dict[str, Optional[str]]] = {}
+    for index, line in enumerate(comm_lines or []):
+        pid, comm = _split_pid(line, index)
+        rows.setdefault(pid, {"pid": pid, "comm": None, "args": None})["comm"] = comm
+    for index, line in enumerate(args_lines or []):
+        pid, args = _split_pid(line, index)
+        rows.setdefault(pid, {"pid": pid, "comm": None, "args": None})["args"] = args
+    return list(rows.values())
+
+
+def _process_lines() -> Optional[List[str]]:
+    """Argument vectors of every process, kept for callers that read only argv."""
+    table = _process_table()
+    if table is None:
+        return None
+    return [row["args"] for row in table if row["args"] is not None]
 
 
 def _matches_pattern(executable: str) -> bool:
@@ -137,6 +287,22 @@ def _executable_from_line(line: str) -> str:
         close = text.find('"', 1)
         if close > 1:
             return text[1:close]
+    # A launch ARGUMENT after the path — a project file, most likely — is not a
+    # flag, so the flag-stripping loop below leaves it attached and the suffix
+    # test fails. If the line STARTS with a path that ends in a Resolve pattern
+    # at a token boundary, that path is the executable, whatever follows it.
+    # The prefix must contain no quote (a launcher quoting the path) and no
+    # flag token (`/bin/sh -c /opt/resolve/bin/resolve` names Resolve without
+    # being it), which keeps the "mere mention" cases out.
+    for pattern in RESOLVE_PROCESS_PATTERNS:
+        cut = text.find(pattern)
+        while cut != -1:
+            end = cut + len(pattern)
+            prefix = text[:end]
+            at_boundary = end == len(text) or text[end].isspace()
+            if at_boundary and '"' not in prefix and " -" not in prefix:
+                return prefix
+            cut = text.find(pattern, cut + 1)
     while True:
         stripped = text.rstrip()
         cut = stripped.rfind(" -")
@@ -151,12 +317,42 @@ def _executable_from_line(line: str) -> str:
     return text
 
 
-def resolve_processes() -> Optional[List[str]]:
-    """Command lines of running Resolve applications, or None if undeterminable."""
-    lines = _process_lines()
-    if lines is None:
+def _argv_unreadable(args: Optional[str]) -> bool:
+    """ps prints `(name)` when the kernel will not hand over the argument vector."""
+    if args is None:
+        return True
+    text = args.strip()
+    return text.startswith("(") and text.endswith(")")
+
+
+def _resolve_rows() -> Optional[List[Dict[str, Optional[str]]]]:
+    """Process-table rows that are a running Resolve application."""
+    table = _process_table()
+    if table is None:
         return None
-    return [line for line in lines if _is_resolve_command(line)]
+    matched = []
+    for row in table:
+        args = row.get("args")
+        comm = row.get("comm")
+        by_args = args is not None and not _argv_unreadable(args) and _is_resolve_command(args)
+        by_comm = comm is not None and _matches_pattern(comm.strip())
+        if by_args or by_comm:
+            matched.append(row)
+    return matched
+
+
+def resolve_processes() -> Optional[List[str]]:
+    """Command lines of running Resolve applications, or None if undeterminable.
+
+    A row whose argv is unreadable reports its executable path instead, so a
+    caller still sees WHICH Resolve is up even when it cannot see how it was
+    started.
+    """
+    rows = _resolve_rows()
+    if rows is None:
+        return None
+    return [row["args"] if not _argv_unreadable(row.get("args")) else (row.get("comm") or "")
+            for row in rows]
 
 
 #: Where the scripting library sits relative to the Resolve executable. The
@@ -212,8 +408,8 @@ def runtime_mode() -> Dict[str, Any]:
     the process list unavailable. Callers must not read None as False; a wrong
     "it has a UI" is what makes an agent wait for a dialog that will never open.
     """
-    processes = resolve_processes()
-    if processes is None:
+    rows = _resolve_rows()
+    if rows is None:
         return {
             "determinable": False,
             "running": None,
@@ -221,7 +417,7 @@ def runtime_mode() -> Dict[str, Any]:
             "instances": None,
             "command_lines": [],
         }
-    if not processes:
+    if not rows:
         return {
             "determinable": True,
             "running": False,
@@ -229,15 +425,23 @@ def runtime_mode() -> Dict[str, Any]:
             "instances": 0,
             "command_lines": [],
         }
+    readable = [row["args"] for row in rows if not _argv_unreadable(row.get("args"))]
+    # Any headless instance makes the reachable one headless: only one Resolve
+    # can hold the singleton, so a second is a conflict to report rather than
+    # a mode to average. An instance counted on its executable path alone has
+    # an argv this process cannot read, so unless another instance shows the
+    # flag the mode is UNKNOWN — None, never False: a wrong "it has a UI" is
+    # what makes an agent wait for a dialog that will never open.
+    headless: Optional[bool] = any(HEADLESS_FLAG in line for line in readable)
+    if not headless and len(readable) < len(rows):
+        headless = None
     return {
         "determinable": True,
         "running": True,
-        # Any headless instance makes the reachable one headless: only one
-        # Resolve can hold the singleton, so a second is a conflict to report
-        # rather than a mode to average.
-        "headless": any(HEADLESS_FLAG in line for line in processes),
-        "instances": len(processes),
-        "command_lines": processes,
+        "headless": headless,
+        "instances": len(rows),
+        "command_lines": [row["args"] if not _argv_unreadable(row.get("args"))
+                          else (row.get("comm") or "") for row in rows],
     }
 
 

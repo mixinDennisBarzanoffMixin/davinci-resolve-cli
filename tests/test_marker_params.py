@@ -1,14 +1,18 @@
 import unittest
 
 import src.server as compound
+from tests._envelope_helpers import domain_payload
 from tests._error_envelope_helpers import err_message
 
 
 def _strip_versioning(d):
-    """Return a copy of a result dict with the destructive_hook _versioning key removed."""
-    if not isinstance(d, dict):
-        return d
-    return {k: v for k, v in d.items() if k != "_versioning"}
+    """Return a copy of a result dict with the additive private envelopes removed.
+
+    `_versioning` (destructive hook) and `_operation` (operation envelope) both
+    ride alongside the domain payload without shadowing it; these tests are
+    about the domain shape.
+    """
+    return domain_payload(d)
 
 
 class TimelineStub:
@@ -124,6 +128,51 @@ class TimelineMarkerParamTest(unittest.TestCase):
     def test_add_defaults_to_current_playhead_relative_to_start(self):
         # Playhead TC 01:00:00:12 on an hour-start timeline is marker frame 12.
         out = compound.timeline_markers("add", {"color": "green"})
+
+        self.assertEqual(_strip_versioning(out), {"success": True, "frame": 12})
+        self.assertEqual(
+            self.timeline.add_calls[-1],
+            (12, "Green", "Marker", "", 1, ""),
+        )
+
+    def test_add_dry_run_returns_preview_without_adding_marker(self):
+        out = compound.timeline_markers(
+            "add",
+            {
+                "frame": 12,
+                "color": "green",
+                "name": "Review",
+                "note": "Check audio",
+                "duration": 4,
+                "custom_data": "marker-12",
+                "dry_run": True,
+            },
+        )
+
+        self.assertEqual(
+            _strip_versioning(out),
+            {
+                "success": True,
+                "dry_run": True,
+                "executed": False,
+                "would_change": {
+                    "operation": "timeline_markers.add",
+                    "frame": 12,
+                    "color": "Green",
+                    "name": "Review",
+                    "note": "Check audio",
+                    "duration": 4,
+                    "custom_data": "marker-12",
+                },
+            },
+        )
+        self.assertEqual(self.timeline.add_calls, [])
+
+    def test_add_dry_run_false_string_adds_marker(self):
+        out = compound.timeline_markers(
+            "add",
+            {"frame": 12, "color": "green", "dry_run": "false"},
+        )
 
         self.assertEqual(_strip_versioning(out), {"success": True, "frame": 12})
         self.assertEqual(
@@ -325,3 +374,34 @@ class TimelineMarkerParamTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CrossLanguageTimecodePinsTest(unittest.TestCase):
+    """The Node converters (editorial/media-inventory/seq-container) and this
+    Python family must agree on the canonical NTSC values, measured against
+    Resolve itself (GetStartFrame, Studio 19.1.3.7). The Node side pins the
+    same numbers in resolve-advanced/test/ntsc-timecode.test.mjs — a change
+    that moves one side must move both."""
+
+    def test_ndf_2997_is_nominal(self):
+        from src.server import _timecode_to_frame_id
+        frames, err = _timecode_to_frame_id("01:00:00:00", 29.97)
+        self.assertIsNone(err)
+        self.assertEqual(frames, 108000)
+
+    def test_df_2997_drops_108_per_hour(self):
+        from src.server import _timecode_to_frame_id
+        frames, err = _timecode_to_frame_id("01:00:00;00", 29.97)
+        self.assertIsNone(err)
+        self.assertEqual(frames, 107892)
+
+    def test_ndf_23976_is_nominal_24_base(self):
+        from src.server import _timecode_to_frame_id
+        frames, err = _timecode_to_frame_id("01:00:00:00", 23.976)
+        self.assertIsNone(err)
+        self.assertEqual(frames, 86400)
+
+    def test_multicam_util_agrees(self):
+        from src.utils.multicam import timecode_to_frames
+        self.assertEqual(timecode_to_frames("01:00:00:00", 29.97), 108000)
+        self.assertEqual(timecode_to_frames("01:00:00;00", 29.97, drop_frame=True), 107892)

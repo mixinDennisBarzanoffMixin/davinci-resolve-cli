@@ -37,7 +37,7 @@ from src.utils.update_check import (
 
 # ─── Version ──────────────────────────────────────────────────────────────────
 
-VERSION = "2.103.2"
+VERSION = "4.7.6"
 # Only hard floor: mcp[cli] requires Python 3.10+. There is no upper bound —
 # Resolve's scripting bridge loads into newer interpreters on recent builds
 # (Python 3.14 verified against Resolve Studio 20.3.2). Older Resolve builds
@@ -393,6 +393,33 @@ def vscode_global_storage():
         return xdg_config() / "Code" / "User" / "globalStorage"
 
 
+def antigravity_config():
+    """Antigravity's MCP config path, resolved by what is on disk (issue #159).
+
+    Two contributors report two different locations and neither is verifiable
+    from here: 85afe82 added ~/.gemini/antigravity/mcp_config.json, and #159
+    reports ~/.gemini/config/mcp_config.json, with ~/.gemini/antigravity/ being
+    runtime state (logs, crash reports, brain state). Swapping one unverifiable
+    path for the other is a coin flip that breaks it for whoever was right, and
+    this repo has already been bitten by a documented-but-decoy config path
+    (Claude Desktop MSIX, issue #93).
+
+    So probe instead of choosing. ~/.gemini/config/ is checked first because
+    the installer has never written there — if that file exists, something else
+    created it, which is real evidence. ~/.gemini/antigravity/mcp_config.json
+    may exist merely because an earlier run of this installer put it there.
+    With neither present, fall back to ~/.gemini/config/ as #159 documents.
+    """
+    candidates = (
+        home() / ".gemini" / "config" / "mcp_config.json",
+        home() / ".gemini" / "antigravity" / "mcp_config.json",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 # Each client entry:
 #   id, name, config_path_fn, config_key, merge_strategy, notes
 # config_path_fn returns the path; config_key is the JSON key wrapping the server entry
@@ -402,7 +429,7 @@ MCP_CLIENTS = [
     {
         "id": "antigravity",
         "name": "Antigravity",
-        "get_path": lambda: home() / ".gemini" / "antigravity" / "mcp_config.json",
+        "get_path": antigravity_config,
         "config_key": "mcpServers",
         "notes": "Google's agentic AI coding assistant (VS Code fork)",
     },
@@ -1064,7 +1091,7 @@ def read_json(path):
     existing settings (issue #71: Zed's settings.json ships with comments).
     """
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
     except FileNotFoundError:
         return {}
@@ -1093,7 +1120,7 @@ def write_json(path, data):
         backup = path.with_suffix(path.suffix + ".backup")
         shutil.copy2(path, backup)
 
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
 
@@ -1153,13 +1180,131 @@ def build_advanced_entry(server_path, python_path=None):
     pyaaf2). We pin AAF_PROBE_PYTHON to the project venv's interpreter — the same
     venv install.py installs pyaaf2 into — so AAF preview works out of the box
     instead of depending on whatever `python3` happens to be on PATH.
+
+    The bin is only registered when this install can actually boot it. Pointing
+    a client config at a bin whose module tree is absent produced issue #179:
+    the process died with ERR_MODULE_NOT_FOUND before the MCP handshake and
+    every client reported the same uninformative "subprocess closed stdout
+    before responding". When the layout is incomplete we emit the npx form
+    instead, which resolves the module and its deps from the npm cache.
     """
     project_dir = Path(server_path).resolve().parents[1]  # .../src/server.py -> repo root
+    if not advanced_is_bootable(project_dir):
+        return build_advanced_npx_entry(python_path)
     advanced_bin = project_dir / "bin" / "davinci-resolve-advanced-mcp.mjs"
-    entry = {"command": "node", "args": [str(advanced_bin)]}
+    entry = {"command": resolve_node_command(), "args": [str(advanced_bin)]}
     if python_path:
         entry["env"] = {"AAF_PROBE_PYTHON": str(python_path)}
     return entry
+
+
+def advanced_required_deps(project_dir):
+    """Runtime deps the advanced server needs, read from its own manifest.
+
+    resolve-advanced/package.json is the single source of truth — the same file
+    `npm install` in that directory acts on, and the same list the advanced bin
+    preflights against. Nothing here restates it.
+    """
+    manifest = Path(project_dir) / "resolve-advanced" / "package.json"
+    try:
+        with open(manifest, "r", encoding="utf-8") as fh:
+            return list(json.load(fh).get("dependencies", {}).keys())
+    except Exception:
+        return []
+
+
+def advanced_is_bootable(project_dir):
+    """True when resolve-advanced/ and its Node deps are both present here."""
+    project_dir = Path(project_dir)
+    if not (project_dir / "resolve-advanced" / "server" / "index.mjs").is_file():
+        return False
+    required = advanced_required_deps(project_dir)
+    if not required:
+        return False
+    # Deps live either in resolve-advanced/node_modules (what `npx
+    # davinci-resolve-mcp setup` provisions in a managed install) or hoisted to
+    # the package root (what a plain `npm install` of this package produces).
+    for dep in required:
+        local = project_dir / "resolve-advanced" / "node_modules" / dep
+        hoisted = project_dir / "node_modules" / dep
+        if not local.is_dir() and not hoisted.is_dir():
+            return False
+    return True
+
+
+def build_advanced_npx_entry(python_path=None):
+    """Fallback advanced entry that runs from the npm package, not this tree.
+
+    Slower to start (npx resolves the package first) but it always boots, which
+    a managed-install bin path does not guarantee.
+    """
+    entry = {
+        "command": "npx",
+        "args": ["-y", "--package", f"davinci-resolve-mcp@{package_version()}",
+                 "davinci-resolve-advanced-mcp"],
+    }
+    if python_path:
+        entry["env"] = {"AAF_PROBE_PYTHON": str(python_path)}
+    return entry
+
+
+def package_version(default="latest"):
+    """Version from package.json, for pinning the npx fallback."""
+    manifest = Path(__file__).resolve().parent / "package.json"
+    try:
+        with open(manifest, "r", encoding="utf-8") as fh:
+            return json.load(fh).get("version") or default
+    except Exception:
+        return default
+
+
+# Node floor for the advanced server (package.json engines). Below it the
+# pure-JS tools limp along while native-dep paths (better-sqlite3) die with a
+# cryptic NODE_MODULE_VERSION mismatch — measured live when a client config's
+# bare "node" resolved to an nvm v18 that a GUI app had on PATH.
+NODE_MIN = (20, 9)
+
+
+def _node_version(cmd):
+    try:
+        out = subprocess.run([cmd, "--version"], capture_output=True, text=True,
+                             encoding="utf-8", timeout=10, check=False).stdout.strip()
+        parts = out.lstrip("v").split(".")
+        return (int(parts[0]), int(parts[1]))
+    except Exception:
+        return None
+
+
+def resolve_node_command():
+    """Absolute path to a Node >= the floor, or bare "node" as a last resort.
+
+    A bare "node" in a client config resolves against WHATEVER PATH the
+    launching GUI app has — which on this machine meant an nvm v18 while the
+    repo floor is 20.9. Pin the binary at install time instead: prefer the
+    node on the installer's PATH if it meets the floor, else the newest
+    nvm-managed node that does.
+    """
+    on_path = shutil.which("node")
+    if on_path:
+        ver = _node_version(on_path)
+        if ver and ver >= NODE_MIN:
+            return str(Path(on_path).resolve())
+    nvm_dir = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_dir.is_dir():
+        candidates = []
+        for d in nvm_dir.iterdir():
+            node_bin = d / "bin" / "node"
+            if node_bin.exists():
+                ver = _node_version(str(node_bin))
+                if ver and ver >= NODE_MIN:
+                    candidates.append((ver, str(node_bin)))
+        if candidates:
+            return max(candidates)[1]
+    print(
+        f"  {yellow('Node:')} no Node >= {NODE_MIN[0]}.{NODE_MIN[1]} found; writing a bare 'node' command. "
+        "The advanced server will refuse to start under an older Node and name this fix."
+    )
+    return "node"
 
 
 def generate_manual_config(python_path, server_path, api_path, lib_path):
@@ -1240,7 +1385,7 @@ def install_dependencies(venv_path, project_dir):
     # downgrade it, and the fix does not depend on install ordering. Lift both
     # together when server.py is ported to the 2.x layout.
     subprocess.run(
-        [str(pip), "install", "-q", "mcp[cli]>=1.29,<2"],
+        [str(pip), "install", "-q", "mcp[cli]>=1.30,<2"],
         check=True, capture_output=True
     )
 
@@ -1302,37 +1447,57 @@ def access_violation_message(returncode, version=None):
 
 
 def verify_resolve_connection(python_path, api_path, lib_path):
-    """Try to import DaVinciResolveScript and connect."""
+    """Probe Resolve without exposing short-lived children to Fusion teardown.
+
+    The persistent bridge is tried before Blackmagic's native scripting module.
+    If direct scripting is genuinely required, the disposable child flushes its
+    result and hard-exits after any native import attempt so fusionscript's
+    background RemoteApp thread cannot race CPython finalization.
+    """
     if not api_path:
         return False, "Resolve API path not found"
 
     env = {**os.environ, **build_server_env(python_path, api_path, lib_path)}
     modules_path = env["PYTHONPATH"]
     repo_root = str(Path(__file__).resolve().parent)
-    # Route through connect_resolve so Network mode (RESOLVE_SCRIPT_HOST, propagated
-    # into env by build_server_env) uses the explicit IP-targeted overload. Fall
-    # back to Local-mode discovery if the helper cannot be imported.
     test_script = textwrap.dedent(f"""\
+        import os
         import sys
         sys.path.insert(0, {modules_path!r})
         sys.path.insert(0, {repo_root!r})
+        native_import_attempted = False
         try:
-            import DaVinciResolveScript as dvr
             try:
                 from src.utils.resolve_connection import connect_resolve
             except Exception:
-                connect_resolve = lambda mod: mod.scriptapp('Resolve')
-            resolve = connect_resolve(dvr)
+                connect_resolve = None
+
+            resolve = None
+            if connect_resolve is not None:
+                resolve = connect_resolve(None)
+
+            if resolve is None:
+                native_import_attempted = True
+                import DaVinciResolveScript as dvr
+                if connect_resolve is not None:
+                    resolve = connect_resolve(dvr)
+                else:
+                    resolve = dvr.scriptapp('Resolve')
+
             if resolve:
                 name = resolve.GetProductName()
                 ver = resolve.GetVersionString()
-                print(f"CONNECTED: {{name}} {{ver}}")
+                print(f"CONNECTED: {{name}} {{ver}}", flush=True)
             else:
-                print("IMPORTED_OK: Module loads but Resolve not running or not responding")
+                print("IMPORTED_OK: Module loads but Resolve not running or not responding", flush=True)
         except ImportError as e:
-            print(f"IMPORT_ERROR: {{e}}")
+            print(f"IMPORT_ERROR: {{e}}", flush=True)
         except Exception as e:
-            print(f"ERROR: {{e}}")
+            print(f"ERROR: {{e}}", flush=True)
+        if native_import_attempted:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)
     """)
 
     process_timeout = 10.0
@@ -1373,11 +1538,12 @@ def verify_resolve_connection(python_path, api_path, lib_path):
     except Exception as e:
         return False, str(e)
 
+
 # ─── Interactive UI ───────────────────────────────────────────────────────────
 
 def print_banner():
     title = f"DaVinci Resolve MCP Server — Installer v{VERSION}"
-    subtitle = "32 compound · 329 full · 3 platforms"
+    subtitle = "37 compound · 389 full · 3 platforms"
     print()
     print(bold("  ╔══════════════════════════════════════════════════════╗"))
     print(bold(f"  ║{title:^54}║"))

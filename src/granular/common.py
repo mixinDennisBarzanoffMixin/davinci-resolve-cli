@@ -28,6 +28,12 @@ from src.utils.app_control import (
     restart_resolve_app,
 )
 from src.utils.cdl import normalize_cdl_payload
+from src.utils.destructive_hook import granular_destructive_op
+from src.utils.confirm_tokens import (
+    ConfirmTokenStore,
+    gate_required_from,
+    plain_error as plain_confirm_error,
+)
 from src.utils.cloud_operations import (
     create_cloud_project,
     import_cloud_project,
@@ -87,7 +93,7 @@ if not logging.getLogger().handlers:
         handlers=[logging.StreamHandler()],
     )
 
-VERSION = "2.103.2"
+VERSION = "4.7.6"
 logger = logging.getLogger("davinci-resolve-mcp")
 logger.info(f"Starting DaVinci Resolve MCP Server v{VERSION}")
 logger.info(f"Detected platform: {get_platform()}")
@@ -95,6 +101,8 @@ logger.info(f"Using Resolve API path: {RESOLVE_API_PATH}")
 logger.info(f"Using Resolve library path: {RESOLVE_LIB_PATH}")
 
 mcp = FastMCP("DaVinciResolveMCP")
+if hasattr(mcp, "_mcp_server"):
+    mcp._mcp_server.version = VERSION
 
 READ_ONLY_TOOL = ToolAnnotations(
     readOnlyHint=True,
@@ -140,65 +148,112 @@ EXTERNAL_DESTRUCTIVE_TOOL = ToolAnnotations(
 )
 
 
+#: Namespace segments that sit in FRONT of the verb in a granular tool name.
+#:
+#: The prefix heuristic below reads the leading verb, so a tool called
+#: `ti_delete_marker_at_frame` matched none of the verb lists and fell through to
+#: the plain write default — 86 tools were mis-hinted this way, 43 destructive ones
+#: advertised as ordinary writes (a client gating on `destructiveHint` was told
+#: `ti_copy_grades` was safe) and 43 pure readers advertised as writes. Every tool
+#: carrying one of these is `<namespace>_<verb>_...`, so one strip exposes the verb.
+NAMESPACE_PREFIXES = (
+    "ti_",
+    "timeline_",
+    "graph_",
+    "folder_",
+)
+
+
+def _strip_namespace(name: str) -> str:
+    """Drop one leading namespace segment so the verb heuristic can see the verb."""
+    for prefix in NAMESPACE_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def _verb_probe(tool_name: str) -> str:
+    """The stripped name, shaped so a BARE verb still matches its prefix.
+
+    Every verb prefix ends in "_", so `timeline_export` -> `export` would match
+    nothing: the tool name is exactly `<namespace>_<verb>` with no suffix. The
+    trailing "_" makes `export` match `export_` without loosening anything else.
+    """
+    return _strip_namespace((tool_name or "").lower()) + "_"
+
+
+#: Verb prefixes, checked in this order against the name AFTER its namespace is
+#: stripped. Module-level so `tests/test_granular_tool_annotations.py` can tell a
+#: deliberate write from a name that matched nothing and fell through to the default.
+READ_PREFIXES = (
+    "get_",
+    "list_",
+    "inspect_",
+    "probe_",
+    "validate_",
+    "compare_",
+    # NOT "detect_": Timeline.DetectSceneCuts adds cuts to the timeline, and the
+    # compound server rates detect_scene_cuts destructive. It only ever looked like
+    # a read because the `timeline_` namespace hid it from this list.
+    "summarize_",
+    "review_",
+    "is_",
+    "has_",
+)
+DESTRUCTIVE_PREFIXES = (
+    "delete_",
+    "remove_",
+    "clear_",
+    "reset_",
+    "replace_",
+    "unlink_",
+    "quit",
+    "restart",
+    "close_",
+    "stop_",
+    "overwrite_",
+    "lift_",
+    "set_",
+    "load_",
+    "switch_",
+)
+WRITE_PREFIXES = (
+    "add_",
+    "append_",
+    "apply_",
+    "assign_",
+    "copy_",
+    "create_",
+    "duplicate_",
+    "export_",
+    "import_",
+    "insert_",
+    "link_",
+    "move_",
+    "open_",
+    "render_",
+    "rename_",
+    "save_",
+    "start_",
+    "sync_",
+    "transcribe_",
+)
+
+
+def matches_a_verb(tool_name: str) -> bool:
+    """Did the name resolve to a verb rule, or fall through to the default?"""
+    return _verb_probe(tool_name).startswith(
+        READ_PREFIXES + DESTRUCTIVE_PREFIXES + WRITE_PREFIXES)
+
+
 def _annotations_for_tool_name(tool_name: str) -> ToolAnnotations:
     """Infer conservative MCP client-safety hints for legacy granular tools."""
-    name = (tool_name or "").lower()
-    read_prefixes = (
-        "get_",
-        "list_",
-        "inspect_",
-        "probe_",
-        "validate_",
-        "compare_",
-        "detect_",
-        "summarize_",
-        "review_",
-        "is_",
-        "has_",
-    )
-    destructive_prefixes = (
-        "delete_",
-        "remove_",
-        "clear_",
-        "reset_",
-        "replace_",
-        "unlink_",
-        "quit",
-        "restart",
-        "close_",
-        "stop_",
-        "overwrite_",
-        "lift_",
-        "set_",
-        "load_",
-        "switch_",
-    )
-    write_prefixes = (
-        "add_",
-        "append_",
-        "apply_",
-        "assign_",
-        "copy_",
-        "create_",
-        "duplicate_",
-        "export_",
-        "import_",
-        "insert_",
-        "link_",
-        "move_",
-        "open_",
-        "render_",
-        "rename_",
-        "save_",
-        "start_",
-        "sync_",
-        "transcribe_",
-    )
-    if name.startswith(read_prefixes):
+    name = _verb_probe(tool_name)
+    if name.startswith(READ_PREFIXES):
         return READ_ONLY_TOOL
-    if name.startswith(destructive_prefixes):
+    if name.startswith(DESTRUCTIVE_PREFIXES):
         return DESTRUCTIVE_TOOL
-    if name.startswith(write_prefixes):
+    if name.startswith(WRITE_PREFIXES):
         return WRITE_TOOL
     return WRITE_TOOL
 
@@ -289,13 +344,15 @@ class ResolveProxy:
 def _resolve_safe_dir(path):
     """Redirect sandbox/temp paths that Resolve can't access to ~/Desktop/resolve-stills.
 
-    Covers macOS (/var/folders, /private/var), Linux (/tmp, /var/tmp),
-    and Windows (AppData\\Local\\Temp) sandbox temp directories.
+    Covers macOS (/var/folders, /private/var, /tmp, /private/tmp), Linux (/tmp,
+    /var/tmp), and Windows (AppData\\Local\\Temp) sandbox temp directories.
     """
     system_temp = tempfile.gettempdir()
     _is_sandbox = False
     if platform.system() == "Darwin":
-        _is_sandbox = path.startswith("/var/") or path.startswith("/private/var/")
+        # /tmp is a symlink to /private/tmp on macOS; Resolve's exporters fail
+        # silently into both, same as /var/folders (matches src/server.py).
+        _is_sandbox = path.startswith(("/var/", "/private/var/", "/tmp/", "/private/tmp/")) or path in ("/tmp", "/private/tmp")
     elif platform.system() == "Linux":
         _is_sandbox = path.startswith("/tmp") or path.startswith("/var/tmp")
     elif platform.system() == "Windows":
@@ -572,7 +629,22 @@ def _normalize_record_frame(ci, index, timeline_start_frame=None):
         }
 
     start = _frame_int(timeline_start_frame)
-    if start in (None, 0) or mode == "absolute":
+    if mode == "absolute":
+        # recordFrame counts from Resolve's global frame zero; a value below
+        # the timeline start renders as ~0 frames while every readback agrees
+        # (issue #164). No legitimate placement exists there — refuse.
+        if start not in (None, 0) and rf < start:
+            return None, {
+                "error": (
+                    f"clip_infos[{index}] recordFrame {rf} is before the timeline "
+                    f"start frame {start}. recordFrame is timeline-absolute, so "
+                    "content placed there reads back correctly but renders as ~0 "
+                    "frames. Use record_frame_mode='relative' (default) or pass an "
+                    f"absolute frame >= {start}."
+                )
+            }
+        return rf, None
+    if start in (None, 0):
         return rf, None
     if mode == "auto":
         return (start + rf) if rf < start else rf, None
@@ -781,5 +853,51 @@ def _ai_result_payload(returned):
     if message:
         payload["error"] = message
     return payload
+
+
+# ── Confirmation gate ────────────────────────────────────────────────────────
+#
+# The granular server is a separate process from the compound one, so it holds its
+# own token table; a token minted here is not honoured there and vice versa. What
+# is shared is the implementation and the on/off policy, from
+# src/utils/confirm_tokens.py — the granular tools return plain dicts rather than
+# the compound envelope, so the error builder is the plain one.
+
+_MEDIA_ANALYSIS_PREFS_ENV = "DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS"
+
+
+def _media_analysis_preferences():
+    """Read the same preferences file the compound server and setup write."""
+    import json
+
+    override = os.environ.get(_MEDIA_ANALYSIS_PREFS_ENV)
+    if override:
+        path = os.path.realpath(os.path.abspath(os.path.expanduser(override)))
+    else:
+        path = os.path.join(PROJECT_DIR, "logs", "media-analysis-preferences.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _confirm_token_required() -> bool:
+    """Honor the setup default destructive.require_confirm_token (default True)."""
+    try:
+        prefs = _media_analysis_preferences()
+    except Exception:
+        prefs = {}
+    return gate_required_from(prefs)
+
+
+CONFIRM_TOKENS = ConfirmTokenStore(
+    err=plain_confirm_error,
+    # Resolved per call so the preference can be changed without a server restart,
+    # and so tests can patch the module-level function.
+    required=lambda: _confirm_token_required(),
+)
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

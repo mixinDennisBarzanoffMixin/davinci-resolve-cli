@@ -2,6 +2,8 @@
 
 import ast
 import json
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -11,7 +13,7 @@ GRANULAR_DIR = PROJECT_ROOT / "src" / "granular"
 
 
 def _parse(path: Path) -> ast.AST:
-    return ast.parse(path.read_text())
+    return ast.parse(path.read_text(encoding="utf-8"))
 
 
 def _is_mcp_tool_decorator(decorator: ast.expr) -> bool:
@@ -98,7 +100,7 @@ class McpSdkPinTest(unittest.TestCase):
         # lets a fresh install resolve to 2.x. Conditional on server.py's
         # import so the guard retires itself when the server is ported to the
         # 2.x layout, rather than blocking that port.
-        server_src = (PROJECT_ROOT / "src" / "server.py").read_text()
+        server_src = (PROJECT_ROOT / "src" / "server.py").read_text(encoding="utf-8")
         if "from mcp.server.fastmcp import" not in server_src:
             self.skipTest("server.py no longer imports mcp.server.fastmcp")
 
@@ -114,7 +116,7 @@ class McpSdkPinTest(unittest.TestCase):
         ]
         specs += [
             line.strip()
-            for line in (PROJECT_ROOT / "requirements.txt").read_text().splitlines()
+            for line in (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
             if line.strip().startswith("mcp[cli]")
         ]
         self.assertGreaterEqual(
@@ -131,15 +133,56 @@ class McpSdkPinTest(unittest.TestCase):
 
 
 def test_npm_package_metadata():
-    package = json.loads((PROJECT_ROOT / "package.json").read_text())
+    package = json.loads((PROJECT_ROOT / "package.json").read_text(encoding="utf-8"))
     assert package["name"] == "davinci-resolve-cli"
-    assert package["version"] == _string_assignment(PROJECT_ROOT / "install.py", "VERSION")
+    for stamped in ("install.py", "src/server.py", "src/granular/common.py"):
+        assert package["version"] == _string_assignment(PROJECT_ROOT / stamped, "VERSION"), stamped
     assert package["bin"]["davinci-resolve-mcp"] == "./bin/davinci-resolve-mcp.mjs"
+    assert package["bin"]["davinci-resolve-advanced-mcp"] == "./bin/davinci-resolve-advanced-mcp.mjs"
     assert package["bin"]["davinci-resolve"] == "./bin/davinci-resolve.mjs"
     assert package["bin"]["davinci-resolve-cli"] == "./bin/davinci-resolve.mjs"
     assert package["bin"]["dvr"] == "./bin/davinci-resolve.mjs"
     assert (PROJECT_ROOT / "bin" / "davinci-resolve-mcp.mjs").exists()
+    assert (PROJECT_ROOT / "bin" / "davinci-resolve-advanced-mcp.mjs").exists()
     assert (PROJECT_ROOT / "bin" / "davinci-resolve.mjs").exists()
+
+
+def test_advanced_launcher_help_and_version_do_not_import_server_deps():
+    """Fresh source checkouts should expose bin metadata before npm install.
+
+    The advanced launcher used to import the stdio server before looking at
+    argv, so even `--help` failed with ERR_MODULE_NOT_FOUND when node_modules was
+    absent. Keep help/version dependency-light like the main launcher.
+    """
+    node = shutil.which("node")
+    if not node:
+        return
+    package = json.loads((PROJECT_ROOT / "package.json").read_text(encoding="utf-8"))
+    launcher = PROJECT_ROOT / "bin" / "davinci-resolve-advanced-mcp.mjs"
+
+    help_result = subprocess.run(
+        [node, str(launcher), "--help"],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    assert "davinci-resolve-advanced-mcp --version" in help_result.stdout
+    assert "ERR_MODULE_NOT_FOUND" not in help_result.stderr
+
+    version_result = subprocess.run(
+        [node, str(launcher), "--version"],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert version_result.returncode == 0, version_result.stderr
+    assert version_result.stdout.strip() == package["version"]
+    assert "ERR_MODULE_NOT_FOUND" not in version_result.stderr
 
 
 def test_package_lock_in_sync():
@@ -154,8 +197,8 @@ def test_package_lock_in_sync():
 
     Regenerate with `npm install --package-lock-only`, and commit the result.
     """
-    package = json.loads((PROJECT_ROOT / "package.json").read_text())
-    lock = json.loads((PROJECT_ROOT / "package-lock.json").read_text())
+    package = json.loads((PROJECT_ROOT / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads((PROJECT_ROOT / "package-lock.json").read_text(encoding="utf-8"))
     root = lock["packages"][""]
 
     assert lock["version"] == package["version"], (
@@ -183,11 +226,11 @@ def test_utils_syntax():
 
 def test_compound_tool_count():
     # 35 = 33 baseline + edit_engine (Phase E) + timeline_frame (#146).
-    assert _count_mcp_tools(PROJECT_ROOT / "src" / "server.py") == 36
+    assert _count_mcp_tools(PROJECT_ROOT / "src" / "server.py") == 37
 
 
 def test_prompt_registrations():
-    source = (PROJECT_ROOT / "src" / "server.py").read_text()
+    source = (PROJECT_ROOT / "src" / "server.py").read_text(encoding="utf-8")
     # 2 baseline (davinci_resolve_workflow + analyze_media) + 5 F2 workflow prompts
     # + 7 per-domain workflow routers.
     assert source.count("@mcp.prompt") == 14
@@ -221,7 +264,7 @@ def test_prompt_registrations():
 
 def test_granular_tool_count():
     total = sum(_count_mcp_tools(py_file) for py_file in GRANULAR_DIR.glob("*.py"))
-    assert total == 353
+    assert total == 389
 
 
 def test_reported_granular_tools_have_explicit_annotations():

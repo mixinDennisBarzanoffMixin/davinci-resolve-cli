@@ -18,7 +18,13 @@ const PROBE = fileURLToPath(new URL('./aaf_probe.py', import.meta.url));
 
 /** python interpreter — overridable for environments/tests (must have `aaf2` importable). */
 function pythonCmd() {
-  return process.env.AAF_PROBE_PYTHON || process.env.PYTHON || 'python3';
+  if (process.env.AAF_PROBE_PYTHON) return process.env.AAF_PROBE_PYTHON;
+  if (process.env.PYTHON) return process.env.PYTHON;
+  // The repo venv carries pyaaf2; a bare python3 usually does not. Prefer it
+  // when present so the tool path works without env plumbing.
+  const venvPy = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'venv', 'bin', 'python');
+  if (existsSync(venvPy)) return venvPy;
+  return 'python3';
 }
 
 const REMEDIATION =
@@ -97,6 +103,9 @@ function sequenceSummary(s) {
     startFrame: s.startFrame ?? null,
     startTimecodeFps: s.startTimecodeFps ?? null,
     startTimecodeDrop: s.startTimecodeDrop ?? null,
+    // E126: a composition another composition uses as a clip is NESTED — a
+    // picker should not offer it as a turnover of its own.
+    nestedIn: Array.isArray(s.nestedIn) ? s.nestedIn : [],
   };
   if (s.unhandled && Object.keys(s.unhandled).length) out.unhandled = s.unhandled;
   return out;
@@ -127,7 +136,9 @@ export async function parseAafDocument(contentOrPath) {
   const { sequences } = await runProbe(aafPath);
   const events = [];
   for (const seq of sequences || []) for (const ev of seq.events || []) events.push(ev);
-  return { events, sequences: (sequences || []).map(sequenceSummary) };
+  // Summaries PLUS each sequence's own events — the assemble picker needs
+  // per-sequence events without a second probe run.
+  return { events, sequences: (sequences || []).map((sq) => ({ ...sequenceSummary(sq), events: sq.events || [] })) };
 }
 
 /**

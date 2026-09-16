@@ -9,6 +9,15 @@
  * fidelity; per-clip effects/color do NOT (the Premiere→Resolve semantic gap, flagged not faked).
  */
 import { drt } from './libs.mjs';
+import { diffChangelist, pairEvents } from './editorial.mjs';
+
+const COLOR_MAP = {
+  blue: 'Blue', cyan: 'Cyan', green: 'Green', yellow: 'Yellow', red: 'Red',
+  pink: 'Pink', purple: 'Purple', magenta: 'Fuchsia', fuchsia: 'Fuchsia',
+  rose: 'Rose', lavender: 'Lavender', sky: 'Sky', mint: 'Mint',
+  lemon: 'Lemon', sand: 'Sand', cocoa: 'Cocoa', cream: 'Cream',
+  orange: 'Sand', white: 'Cream', black: 'Cocoa',
+};
 
 const pad = (n, w = 2) => String(Math.max(0, Math.floor(n))).padStart(w, '0');
 
@@ -144,17 +153,30 @@ export function eventsToOTIO(events, opts = {}) {
         },
         active_media_reference_key: 'DEFAULT_MEDIA',
       };
-      if ((e.speed ?? 100) !== 100 || e.reverse) {
+      if ((e.speed ?? 100) === 0) {
+        // Zero speed = freeze: OTIO's own schema for it (a LinearTimeWarp
+        // subclass with time_scalar 0), readable by both conventions (E103).
+        clip.effects.push({ OTIO_SCHEMA: 'FreezeFrame.1', name: 'Freeze', metadata: {}, effect_name: 'FreezeFrame', time_scalar: 0 });
+      } else if ((e.speed ?? 100) !== 100 || e.reverse) {
         clip.effects.push({ OTIO_SCHEMA: 'LinearTimeWarp.1', name: 'Speed', metadata: {}, effect_name: 'LinearTimeWarp', time_scalar: (e.reverse ? -1 : 1) * ((e.speed ?? 100) / 100) });
       }
       if (e.transition) {
+        // Span fidelity (E102): carry the source event's actual alignment
+        // instead of forcing centered — a centered rewrite of a start-at-cut
+        // fade-in demands incoming pre-roll the source never needed, and the
+        // conform then drops it as handle starvation.
+        const d = e.transition.duration || 0;
+        let inOff = Math.ceil(d / 2);
+        if (e.transition.alignment === 'start') inOff = 0;
+        else if (e.transition.inOffset != null) inOff = Math.max(0, Math.min(d, e.transition.inOffset));
+        else if (e.transition.recStart != null && e.recIn != null) inOff = Math.max(0, Math.min(d, e.recIn - e.transition.recStart));
         children.push({
           OTIO_SCHEMA: 'Transition.1',
           metadata: {},
           name: 'Cross Dissolve',
           transition_type: 'SMPTE_Dissolve',
-          in_offset: rt(Math.ceil((e.transition.duration || 0) / 2), fps),
-          out_offset: rt(Math.floor((e.transition.duration || 0) / 2), fps),
+          in_offset: rt(inOff, fps),
+          out_offset: rt(d - inOff, fps),
         });
       }
       children.push(clip);
@@ -192,21 +214,605 @@ export function eventsToOTIO(events, opts = {}) {
 }
 
 /** Build a CMX3600 EDL string (cuts + M2 speed). Video events only, per EDL convention. */
+/**
+ * eventsToAssembleSpec — normalized interchange events → drt.assemble media spec.
+ *
+ * The coast-to-coast bridge: parseInterchange's events (EDL/AAF/OTIO/XML)
+ * become an importable, RENDERING native .drt via assembleTimeline's
+ * transplant path. Frame math: event frames are NOMINAL-base at the event's
+ * fps (v2.104.6 convention, measured against Resolve); the assemble template
+ * timeline runs 24fps with origin 86400, so rec/src frames convert as
+ * round(frames × 24 / nominalFps). Placement anchors the EARLIEST video
+ * event at the origin. Honesty ledger in the returned report: authored
+ * retimes (constant speed forward AND reverse, and zero-speed FREEZES — all
+ * AUTHORED as real Sm2TimeMaps, r19 keyed form, readback/render-verified;
+ * freezes render-proven frozen via freezedetect, E55/E56), authored vs
+ * dropped transitions (cross-dissolves are AUTHORED when the predecessor
+ * abuts the cut and both sides have handle media — render-verified on
+ * 19.1.3.7; otherwise dropped with the reason, as a cut at the boundary),
+ * and audio: A-track events are AUTHORED as audioOnly cuts on their own
+ * audio tracks (render-verified; the template carries 8 Fairlight-valid
+ * audio tracks) — their presence suppresses the A1 convenience mirror.
+ *
+ * @param {Array} events - normalized events (parseInterchange shape)
+ * @param {object} opts
+ * @param {Object<string,{mediaFilePath:string, spec:object}>} opts.sourceMap -
+ *   event.source (reel) → media file + spec. Every VIDEO event's source must
+ *   be mapped; unmapped reels refuse with the reel names listed.
+ * @param {string} [opts.timelineName]
+ * @returns {{spec: object, report: object}}
+ */
+export function eventsToAssembleSpec(events, opts = {}) {
+  const { sourceMap, timelineName, preserveStartTimecode = false } = opts;
+  if (!Array.isArray(events) || !events.length) {
+    throw new TypeError('eventsToAssembleSpec: events must be a non-empty array');
+  }
+  if (!sourceMap || typeof sourceMap !== 'object') {
+    throw new TypeError('eventsToAssembleSpec: sourceMap {reel: {mediaFilePath, spec}} is required');
+  }
+  const DEFAULT_ORIGIN = 86400;
+  const isAudio = (t) => /^A\d*$/.test(String(t || ''));
+  const isMarker = (t) => t === 'MARKER';
+  const vids = events.filter((e) => !isAudio(e.track) && !isMarker(e.track) && e.recIn != null && e.recOut != null);
+  // AAF exports one event per audio CHANNEL — a stereo/dual-mono clip arrives
+  // as identical legs, one per channel slot (measured on a Resolve 19 rich
+  // export: every audio event duplicated). Merge exact duplicates (same
+  // source/range/srcIn) so they place once instead of refusing as a
+  // same-track overlap. The key deliberately ignores the LANE: since E109
+  // flat slots number A, A2, A3 …, so channel legs of one clip arrive on
+  // different lanes — still one clip, placed once — while a different bed on
+  // its own lane (dialog A, music A2) keeps its lane and never merges.
+  const audsRaw = events.filter((e) => isAudio(e.track) && e.recIn != null && e.recOut != null);
+  const seenAud = new Set();
+  const auds = [];
+  let audioChannelLegsMerged = 0;
+  for (const e of audsRaw) {
+    const k = `${e.source}|${e.recIn}|${e.recOut}|${e.srcIn}|${e.speed ?? 100}|${e.reverse ? 1 : 0}`;
+    if (seenAud.has(k)) { audioChannelLegsMerged += 1; continue; }
+    seenAud.add(k);
+    auds.push(e);
+  }
+  const markerEvents = events.filter((e) => isMarker(e.track) && e.recIn != null);
+  const audioSkipped = events.length - vids.length - audsRaw.length - markerEvents.length;
+  if (!vids.length) throw new Error('eventsToAssembleSpec: no video events with record ranges');
+
+  // BL/BLACK reels are the EDL's built-in black source — they never need a
+  // sourceMap entry. Video BL legs author as Solid Color generator elements
+  // (Resolve's own EDL importer creates exactly that for the slug — but DROPS
+  // the fade dissolves around it, measured E91); audio BL legs are silence,
+  // which an empty track already is.
+  const isBL = (srcName) => /^(BL|BLACK)$/i.test(String(srcName || '').trim());
+  // FLATTENED COMPOUNDS (E121): an XML clipitem that is a compound carries no
+  // inner content, so nothing can be authored for it unless the sourceMap
+  // points its name at a flattened media file. Unmapped ones are DROPPED
+  // with a reason — a hole in the conform the ledger names — rather than
+  // refusing the whole turnover as an unmapped reel.
+  const unresolvedCompounds = [];
+  for (const list of [vids, auds]) {
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const e = list[i];
+      if (e.compound && !sourceMap[e.source]) {
+        unresolvedCompounds.push({ name: e.compound, track: e.track, recIn: e.recIn, recOut: e.recOut, reason: 'XML compound clipitem carries no inner content — re-export as OTIO (nested Stacks flatten) or map the compound name to a flattened media file in sourceMap' });
+        list.splice(i, 1);
+      }
+    }
+  }
+  // NAMED GENERATORS (E145): a Premiere Universal Counting Leader / Black
+  // Video (E141 names them by their Media <Title>) or a DRT generator clip
+  // arrives as an event with generatorName and no file. Black authors as the
+  // BL leg it is (a Solid Color that renders black); anything else has no
+  // Resolve equivalent the bridge can place, so it is DROPPED with a reason
+  // in unresolvedGenerators — a hole the ledger names — instead of refusing
+  // the whole reel as an unmapped source (a real 228-cut reel refused over
+  // its counting leader).
+  const unresolvedGenerators = [];
+  const isBlackGenerator = (name) => /^(black|black video|black matte|slug)$/i.test(String(name || '').trim());
+  for (const list of [vids, auds]) {
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const e = list[i];
+      if (sourceMap[e.source] || isBL(e.source)) continue;
+      const gen = e.generatorName || (isBlackGenerator(e.source) ? e.source : null);
+      if (!gen) continue;
+      if (isBlackGenerator(gen)) { list[i] = { ...e, source: 'BL', generatorName: gen }; continue; }
+      unresolvedGenerators.push({ name: gen, track: e.track, recIn: e.recIn, recOut: e.recOut, reason: 'a named generator with no media and no Resolve equivalent the bridge can author — map its name to a rendered file in sourceMap, or accept the hole' });
+      list.splice(i, 1);
+    }
+  }
+  const unmapped = [...new Set([...vids, ...auds].map((e) => e.source).filter((srcName) => !isBL(srcName) && !sourceMap[srcName]))];
+  if (unmapped.length) {
+    throw new Error(
+      `eventsToAssembleSpec: unmapped source reel(s): ${unmapped.join(', ')} — ` +
+      'every video event needs a sourceMap entry {mediaFilePath, spec}',
+    );
+  }
+
+  const toTl = (frames, fps) => Math.round((frames * 24) / Math.round(fps || 24));
+  // 'V'/'V1' → 1, 'V2' → 2, … (parsers number video tracks; EDL is single-V).
+  const trackNum = (t) => { const m = /^V(\d+)?$/.exec(String(t || 'V')); return m ? (m[1] ? parseInt(m[1], 10) : 1) : 1; };
+  const flattenedRetimes = [];
+  const authoredRetimes = [];
+  const droppedTransitions = [];
+  const transitionCandidates = [];
+  const perSource = new Map();
+  const placements = [];
+
+  // Default: anchor the earliest event at the template origin (86400).
+  // preserveStartTimecode keeps the interchange's ABSOLUTE record positions —
+  // the assembled timeline starts at the turnover's real first record frame
+  // (MediaExtents start-TC patch, measured: imports with the new start TC and
+  // renders). AAF conforms need this: build at THAT start, not 01:00:00:00.
+  const minRecRaw = Math.min(...vids.map((e) => toTl(e.recIn, e.fps)));
+  const minRec = preserveStartTimecode ? 0 : minRecRaw;
+  const ORIGIN = preserveStartTimecode ? 0 : DEFAULT_ORIGIN;
+  const startFrame = preserveStartTimecode ? minRecRaw : DEFAULT_ORIGIN;
+  const blackLegs = [];
+  for (const e of vids) {
+    const recIn = ORIGIN + (toTl(e.recIn, e.fps) - minRec);
+    const recOut = ORIGIN + (toTl(e.recOut, e.fps) - minRec);
+    const durationFrames = recOut - recIn;
+    const vTrackEarly = trackNum(e.track);
+    if (isBL(e.source)) {
+      // BL leg → Solid Color generator element (renders black; the authored
+      // clip↔generator dissolve render-verified E91: luma ramps 124→16
+      // through the junction). ZERO-length BL is kept as a placement so a
+      // fade-in's boundary-shift can GROW it — the CMX fade-in form is a
+      // zero-length BL cut followed by a D event, and a single-sided
+      // transition refuses to import (measured E91), so the shift is the
+      // only authorable shape.
+      if (durationFrames < 0) continue;
+      const el = { type: 'generator', generatorName: 'Solid Color', track: vTrackEarly, startFrame: recIn, durationFrames, srcIn: 0 };
+      // A coloured leg (XMEML fillcolor — fade-to-white, a colour matte) keeps
+      // its colour: the generator's EffectFiltersBA is authored from it (E110).
+      if (e.color && typeof e.color === 'object') el.color = { r: e.color.r, g: e.color.g, b: e.color.b, ...(e.color.a != null ? { a: e.color.a } : {}) };
+      blackLegs.push(el);
+      if (e.transition) {
+        let d = Math.max(2, toTl(e.transition.duration || 0, e.fps) || 2);
+        d += d % 2;
+        let pre = Math.floor(d / 2);
+        if (e.transition.alignment === 'start') pre = 0;
+        else if (e.transition.inOffset != null) pre = Math.min(d, Math.max(0, toTl(e.transition.inOffset, e.fps)));
+        else if (e.transition.recStart != null) {
+          const spanStartAbs = ORIGIN + (toTl(e.transition.recStart, e.fps) - minRec);
+          pre = Math.min(d, Math.max(0, recIn - spanStartAbs));
+        }
+        transitionCandidates.push({
+          atFrame: recIn, durationFrames: d, track: vTrackEarly, pre,
+          explicitSpan: e.transition.alignment != null || e.transition.inOffset != null || e.transition.recStart != null,
+          index: e.index, type: e.transition.type, rawDuration: e.transition.duration,
+          source: e.source, srcIn: Infinity, incomingCutRef: el, cutPoint: e.transition.cutPoint,
+        });
+      }
+      placements.push({ start: recIn, end: recOut, index: e.index, source: e.source, srcIn: Infinity, durationFrames, track: vTrackEarly, cutRef: el });
+      continue;
+    }
+    if (durationFrames <= 0) continue;
+    const vTrack = vTrackEarly;
+    const cut = { startFrame: recIn, durationFrames, srcIn: toTl(e.srcIn ?? 0, e.fps), ...(vTrack > 1 ? { track: vTrack } : {}) };
+    // CLIP markers from the turnover (OTIO clip markers, XMEML clipitem
+    // <marker>s) become ITEM markers on the cut (frames clip-relative,
+    // nominal→timeline converted; anything landing outside the cut is
+    // dropped rather than refused — a marker on trimmed-away material).
+    if (Array.isArray(e.itemMarkers) && e.itemMarkers.length) {
+      const ims = e.itemMarkers
+        .map((m) => ({
+          frame: Math.round(toTl(m.frame ?? 0, e.fps)),
+          color: COLOR_MAP[String(m.color || '').toLowerCase()] || 'Blue',
+          ...(m.name ? { name: m.name } : {}),
+          ...(m.note ? { note: m.note } : {}),
+        }))
+        .filter((m) => m.frame >= 0 && m.frame < durationFrames);
+      if (ims.length) cut.markers = ims;
+    }
+    if ((e.speed ?? 100) !== 100 || e.reverse) {
+      const spd = Math.abs(e.speed ?? 100);
+      if (!(spd > 0)) {
+        // FREEZE (EDL M2 000.0 / zero-speed OTIO warp): authored as the real
+        // freeze Sm2TimeMap harvested live in E55 — holds srcIn for the
+        // whole cut (render-proven frozen via freezedetect on 19.1.3.7).
+        cut.freeze = true;
+        authoredRetimes.push({ index: e.index, source: e.source, speed: 0, freeze: true });
+      } else {
+        // Constant speed, forward or reverse: authored as a real Sm2TimeMap
+        // on the cut (r19 keyed form; readback/render-verified on 19.1.3.7 —
+        // reverse reads back source 71→23 for a srcIn-24 dur-48 cut). Audio
+        // for retimed cuts is video-only downstream.
+        if (spd !== 100) cut.speed = spd / 100;
+        if (e.reverse) cut.reverse = true;
+        authoredRetimes.push({ index: e.index, source: e.source, speed: spd, ...(e.reverse ? { reverse: true } : {}) });
+      }
+    }
+    if (e.transition) {
+      // A dissolve INTO this event, at its record-in boundary. Whether it can
+      // be authored (abutting predecessor + handles both sides) is decided
+      // after all placements are known.
+      let d = Math.max(2, toTl(e.transition.duration || 0, e.fps) || 2);
+      d += d % 2; // even duration keeps every alignment on whole frames
+      // Span geometry per format (E73): `pre` = frames of the span BEFORE
+      // the cut. EDL: 0 (CMX start-at-cut — matches what Resolve's own EDL
+      // importer authors, E61 harvest); OTIO: the explicit in_offset; XMEML:
+      // derived from the transitionitem's own record start; no info: centered.
+      let pre = Math.floor(d / 2);
+      if (e.transition.alignment === 'start') pre = 0;
+      else if (e.transition.inOffset != null) pre = Math.min(d, Math.max(0, toTl(e.transition.inOffset, e.fps)));
+      else if (e.transition.recStart != null) {
+        const spanStartAbs = ORIGIN + (toTl(e.transition.recStart, e.fps) - minRec);
+        pre = Math.min(d, Math.max(0, recIn - spanStartAbs));
+      }
+      transitionCandidates.push({
+        atFrame: recIn, durationFrames: d, track: vTrack, pre,
+        explicitSpan: e.transition.alignment != null || e.transition.inOffset != null || e.transition.recStart != null,
+        index: e.index, type: e.transition.type, rawDuration: e.transition.duration,
+        source: e.source, srcIn: cut.srcIn, incomingCutRef: cut, cutPoint: e.transition.cutPoint,
+      });
+    }
+    placements.push({ start: recIn, end: recOut, index: e.index, source: e.source, srcIn: cut.srcIn, durationFrames, track: vTrack, cutRef: cut });
+    if (!perSource.has(e.source)) perSource.set(e.source, []);
+    perSource.get(e.source).push(cut);
+  }
+
+  // Audio events become explicit audioOnly cuts on their own audio tracks —
+  // this SUPPRESSES the convenience A1 mirror downstream (explicit audio
+  // wins). Render-verified on 19.1.3.7: an offline A3 cut plays at the
+  // native control level through the captured 8-audio-track template's
+  // Fairlight strips. Retimed audio is not authored (no audio timemap yet).
+  const audioTrackNum = (t) => { const m = /^A(\d+)?$/.exec(String(t)); return m && m[1] ? parseInt(m[1], 10) : 1; };
+  const audioPlacements = [];
+  const audioRetimesSkipped = [];
+  const audioLanesBeyondCeiling = [];
+  const audioTransCandidates = [];
+  let audioBlackLegsSkipped = 0;
+  for (const e of auds) {
+    if (isBL(e.source)) {
+      // Audio BL = silence, which an empty track already is. A fade to/from
+      // it has no authorable form (no silence source to cross-fade against);
+      // the level steps at the cut instead of ramping — stated, not silent.
+      audioBlackLegsSkipped += 1;
+      if (e.transition) {
+        droppedTransitions.push({
+          index: e.index, type: e.transition.type, duration: e.transition.duration, trackType: 'audio',
+          reason: 'audio fade to/from BL (silence) — no silence source to cross-fade against; the level steps at the cut',
+        });
+      }
+      continue;
+    }
+    const recIn = ORIGIN + (toTl(e.recIn, e.fps) - minRec);
+    const recOut = ORIGIN + (toTl(e.recOut, e.fps) - minRec);
+    const durationFrames = recOut - recIn;
+    if (durationFrames <= 0) continue;
+    if ((e.speed ?? 100) !== 100 || e.reverse) {
+      audioRetimesSkipped.push({ index: e.index, source: e.source, speed: e.speed, reverse: !!e.reverse, reason: 'audio retime not authorable — the audio engine ignores the clip timemap (measured: reads back retimed, renders 100%); played at 100%' });
+    }
+    const track = audioTrackNum(e.track);
+    // AUDIO LANE CEILING (E135): Resolve authors audio tracks A1–A16 (A9–A16
+    // render-verified); flattened nested sequences can stack lanes far past
+    // that (A40 measured on a real Premiere reels project). Anything above
+    // 16 drops with a reason — named in the ledger, never authored blind.
+    if (track > 16) {
+      audioLanesBeyondCeiling.push({ index: e.index, source: e.source, track: e.track, recIn: e.recIn, recOut: e.recOut, reason: `audio lane ${track} exceeds the A16 ceiling Resolve authors — flatten fewer stacked nested sequences or remix the bed` });
+      continue;
+    }
+    const cut = { startFrame: recIn, durationFrames, srcIn: toTl(e.srcIn ?? 0, e.fps), audioOnly: true, track };
+    if (e.transition) {
+      let d = Math.max(2, toTl(e.transition.duration || 0, e.fps) || 2);
+      d += d % 2;
+      let pre = Math.floor(d / 2);
+      if (e.transition.alignment === 'start') pre = 0;
+      else if (e.transition.inOffset != null) pre = Math.min(d, Math.max(0, toTl(e.transition.inOffset, e.fps)));
+      else if (e.transition.recStart != null) {
+        const spanStartAbs = ORIGIN + (toTl(e.transition.recStart, e.fps) - minRec);
+        pre = Math.min(d, Math.max(0, recIn - spanStartAbs));
+      }
+      audioTransCandidates.push({
+        atFrame: recIn, durationFrames: d, track, pre,
+        explicitSpan: e.transition.alignment != null || e.transition.inOffset != null || e.transition.recStart != null,
+        index: e.index, type: e.transition.type, rawDuration: e.transition.duration,
+        source: e.source, srcIn: cut.srcIn, incomingCutRef: cut, cutPoint: e.transition.cutPoint,
+      });
+    }
+    audioPlacements.push({ start: recIn, end: recOut, index: e.index, track, source: e.source, srcIn: cut.srcIn, durationFrames, cutRef: cut });
+    if (!perSource.has(e.source)) perSource.set(e.source, []);
+    perSource.get(e.source).push(cut);
+  }
+  // AAF overlap reconciliation (E93): an AAF Transition CONSUMES record time
+  // — the incoming component starts `duration` frames before the outgoing
+  // ends, so the walker legitimately emits OVERLAPPING events with the
+  // transition on the incoming (alignment 'start' at the overlap start).
+  // Trim the outgoing's tail to the overlap start before the overlap gates:
+  // the boundary-shift below then re-extends it to the cut point, which is
+  // exactly the AAF notional-cut semantics (CutPoint, centered by default).
+  // Without this the overlap gate threw and NO AAF dissolve could conform.
+  const reconcileAafOverlap = (cands, pls) => {
+    for (const c of cands) {
+      if (!c.explicitSpan || c.pre !== 0) continue;
+      const prev = pls.find((pl) => pl.track === c.track && pl.start < c.atFrame && pl.end > c.atFrame && pl.end - c.atFrame <= c.durationFrames);
+      if (!prev) continue;
+      const o = prev.end - c.atFrame;
+      if (prev.durationFrames <= o) continue; // degenerate: leave for the drop paths
+      prev.end -= o;
+      prev.durationFrames -= o;
+      prev.cutRef.durationFrames -= o;
+    }
+  };
+  reconcileAafOverlap(transitionCandidates, placements);
+  reconcileAafOverlap(audioTransCandidates, audioPlacements);
+
+  audioPlacements.sort((a, b) => a.start - b.start);
+  const audByTrack = new Map();
+  for (const pl of audioPlacements) {
+    if (!audByTrack.has(pl.track)) audByTrack.set(pl.track, []);
+    audByTrack.get(pl.track).push(pl);
+  }
+  for (const [trk, pls] of audByTrack) {
+    for (let i = 1; i < pls.length; i += 1) {
+      if (pls[i].start < pls[i - 1].end) {
+        throw new Error(
+          `eventsToAssembleSpec: audio events ${pls[i - 1].index} and ${pls[i].index} ` +
+          `overlap on audio track ${trk} after frame conversion — one track cannot hold both.`);
+      }
+    }
+  }
+
+  // Overlap is judged PER VIDEO TRACK — V2 stacking over V1 is legitimate
+  // conform geometry (render-verified: an upper-track clip covers the lower).
+  // end-tiebreak keeps a zero-length BL placement AHEAD of the picture leg
+  // that starts at the same frame (fade-in form) — start-only sorting would
+  // read them as an overlap.
+  placements.sort((a, b) => a.start - b.start || a.end - b.end);
+  const byTrack = new Map();
+  for (const pl of placements) {
+    if (!byTrack.has(pl.track)) byTrack.set(pl.track, []);
+    byTrack.get(pl.track).push(pl);
+  }
+  for (const [trk, pls] of byTrack) {
+    for (let i = 1; i < pls.length; i += 1) {
+      if (pls[i].start < pls[i - 1].end) {
+        throw new Error(
+          `eventsToAssembleSpec: events ${pls[i - 1].index} and ${pls[i].index} ` +
+          `overlap on video track ${trk} after frame conversion — one track cannot hold both. ` +
+          'Resolve the overlap upstream (transitions count as cuts at their boundary here).',
+        );
+      }
+    }
+  }
+
+  // Reel aliasing: multiple reels legitimately map to ONE file (Avid mob
+  // names vs tape names, re-linked dailies). Group by mediaFilePath so the
+  // assembly sees one source per FILE, not per reel.
+  const byFile = new Map();
+  for (const [reel, cuts] of perSource.entries()) {
+    const fp = sourceMap[reel].mediaFilePath;
+    if (!byFile.has(fp)) byFile.set(fp, { mediaFilePath: fp, spec: sourceMap[reel].spec, cuts: [] });
+    byFile.get(fp).cuts.push(...cuts);
+  }
+  const media = [...byFile.values()];
+
+  // Author cross-dissolves where the geometry allows it (render-verified on
+  // 19.1.3.7: an offline Sm2TiTransition over transplanted cross-source media
+  // blends 124→181.6→234 at the cut — transitions carry no Fusion comp, so
+  // the byte-keyed comp-cache law does not apply). A candidate is authorable
+  // when a predecessor ends EXACTLY at its cut and both sides have handle
+  // media for the centered span; anything else stays in droppedTransitions
+  // with the reason.
+  const transitions = [];
+  for (const c of transitionCandidates) {
+    const prev = placements.find((pl) => pl.track === c.track && pl.end === c.atFrame);
+    if (!prev) {
+      droppedTransitions.push({ index: c.index, type: c.type, duration: c.rawDuration, reason: 'no abutting predecessor at the cut' });
+      continue;
+    }
+    // Handle math follows the actual span: `pre` frames before the cut need
+    // incoming pre-roll (srcIn >= pre); `post` frames after need outgoing
+    // tail media. A start-at-cut EDL dissolve needs NO incoming handle and a
+    // FULL-duration outgoing tail.
+    const pre = c.pre ?? c.durationFrames / 2;
+    const post = c.durationFrames - pre;
+    // OTIO/XMEML fades (E92): a zero-length BL leg MATERIALIZES to cover its
+    // side of the span whenever the boundary shift alone won't grow it —
+    // empty track renders black, so growth beyond the picture is
+    // render-neutral, and placeTransition needs a physical item on each side
+    // of the junction. (The CMX pre===0 form grows through the shift below.)
+    if (isBL(prev.source) && prev.cutRef.durationFrames === 0 && pre > 0) {
+      prev.cutRef.startFrame -= pre;
+      prev.cutRef.durationFrames += pre;
+      prev.start -= pre;
+    }
+    if (isBL(c.source) && c.incomingCutRef.durationFrames === 0 && post > 0) {
+      c.incomingCutRef.durationFrames += post;
+    }
+    // A BL side has infinite handles: a Solid Color generator extends freely
+    // in both directions (srcIn is already Infinity on BL candidates).
+    const bHandle = c.srcIn >= pre;
+    const aSpec = sourceMap[prev.source] && sourceMap[prev.source].spec;
+    const aFrames = aSpec && Number(aSpec.frameCount);
+    const aHandle = isBL(prev.source)
+      ? true
+      : (Number.isFinite(aFrames) ? prev.srcIn + prev.durationFrames + post <= aFrames : false);
+    if (!bHandle || !aHandle) {
+      droppedTransitions.push({
+        index: c.index, type: c.type, duration: c.rawDuration,
+        reason: `insufficient handles for a ${c.durationFrames}f dissolve spanning [cut-${pre}, cut+${post})` +
+          `${bHandle ? '' : ` (incoming srcIn < ${pre})`}${aHandle ? '' : ` (outgoing tail media < ${post})`}`,
+      });
+      continue;
+    }
+    // Style mapping (all render-verified E61/E67/E68, midpoint-fingerprinted):
+    // EDL W-codes and XMEML wipe effectids → the single wipe style Resolve's
+    // own EDL importer maps every W-code to; XMEML dissolve-family effectids
+    // → their PrettyType styles; anything unrecognized → plain dissolve
+    // (never dropped — a blend at the right junction beats a hard cut).
+    const raw = String(c.type || '');
+    let kind = 'dissolve';
+    if (/^W\d*/i.test(raw) || /wipe/i.test(raw)) kind = 'wipe';
+    else if (/dip to color/i.test(raw)) kind = 'dip';
+    else if (/non-additive/i.test(raw)) kind = 'non-additive';
+    else if (/additive/i.test(raw)) kind = 'additive';
+    else if (/fade to color/i.test(raw)) kind = 'dip'; // fade-to-color is erratic on the skeleton (measured); dip is the verified fade-to-black-and-back
+    else if (/smooth cut/i.test(raw)) kind = 'smooth-cut';
+    // EDGE LAW (E73, measured): the clip boundary must sit STRICTLY INSIDE
+    // the transition span — an edge-aligned span (Start == boundary) renders
+    // INERT. Resolve's own EDL importer solves the CMX start-at-cut case by
+    // MOVING the cut half the duration and centering; reproduce exactly that:
+    // extend the outgoing clip, trim the incoming head (source stays
+    // aligned), and keep the RENDERED span [cut-pre, cut-pre+d) unchanged.
+    let atFrame = c.atFrame;
+    const spanStartAbs = c.atFrame - pre;
+    if (c.explicitSpan && (pre === 0 || pre === c.durationFrames)) {
+      // AAF CutPoint: the notional cut's offset within the overlap — shift
+      // the reshaped boundary there when given (clamped strictly inside the
+      // span, the edge law), else center.
+      const cp = Number.isInteger(c.cutPoint) ? Math.min(c.durationFrames - 1, Math.max(1, c.cutPoint)) : c.durationFrames / 2;
+      const shift = (pre === 0 ? 1 : -1) * cp;
+      // The shift must leave BOTH legs with positive duration — a leg
+      // shorter than the boundary shift cannot host its half of the span
+      // (and a zero-length survivor would re-create the inert edge form).
+      if (c.incomingCutRef.durationFrames - shift <= 0 || prev.cutRef.durationFrames + shift <= 0) {
+        droppedTransitions.push({
+          index: c.index, type: c.type, duration: c.rawDuration,
+          reason: `a leg is shorter than the ${Math.abs(shift)}f boundary shift the edge-aligned span requires`,
+        });
+        continue;
+      }
+      prev.cutRef.durationFrames += shift;
+      c.incomingCutRef.startFrame += shift;
+      c.incomingCutRef.srcIn += shift;
+      c.incomingCutRef.durationFrames -= shift;
+      prev.end += shift;
+      atFrame += shift;
+    }
+    transitions.push({
+      track: c.track, atFrame, durationFrames: c.durationFrames,
+      ...(kind === 'dissolve' ? {} : { type: kind }),
+      ...(c.explicitSpan ? { startFrame: spanStartAbs } : {}),
+    });
+  }
+  // Audio cross-fades, same geometry rules (render-verified on 19.1.3.7 via
+  // the harvested cross-fade template: the highpass RMS ramps, not steps).
+  for (const c of audioTransCandidates) {
+    const prev = audioPlacements.find((pl) => pl.track === c.track && pl.end === c.atFrame);
+    if (!prev) {
+      droppedTransitions.push({ index: c.index, type: c.type, duration: c.rawDuration, trackType: 'audio', reason: 'no abutting predecessor at the cut' });
+      continue;
+    }
+    const pre = c.pre ?? c.durationFrames / 2;
+    const post = c.durationFrames - pre;
+    const bHandle = c.srcIn >= pre;
+    const aSpec = sourceMap[prev.source] && sourceMap[prev.source].spec;
+    const aFrames = aSpec && Number(aSpec.frameCount);
+    const aHandle = Number.isFinite(aFrames) ? prev.srcIn + prev.durationFrames + post <= aFrames : false;
+    if (!bHandle || !aHandle) {
+      droppedTransitions.push({
+        index: c.index, type: c.type, duration: c.rawDuration, trackType: 'audio',
+        reason: `insufficient handles for a ${c.durationFrames}f cross-fade spanning [cut-${pre}, cut+${post})` +
+          `${bHandle ? '' : ` (incoming srcIn < ${pre})`}${aHandle ? '' : ` (outgoing tail media < ${post})`}`,
+      });
+      continue;
+    }
+    let atFrame = c.atFrame;
+    const spanStartAbs = c.atFrame - pre;
+    if (c.explicitSpan && (pre === 0 || pre === c.durationFrames)) {
+      // AAF CutPoint: the notional cut's offset within the overlap — shift
+      // the reshaped boundary there when given (clamped strictly inside the
+      // span, the edge law), else center.
+      const cp = Number.isInteger(c.cutPoint) ? Math.min(c.durationFrames - 1, Math.max(1, c.cutPoint)) : c.durationFrames / 2;
+      const shift = (pre === 0 ? 1 : -1) * cp;
+      prev.cutRef.durationFrames += shift;
+      c.incomingCutRef.startFrame += shift;
+      c.incomingCutRef.srcIn += shift;
+      c.incomingCutRef.durationFrames -= shift;
+      prev.end += shift;
+      atFrame += shift;
+    }
+    transitions.push({
+      track: c.track, atFrame, durationFrames: c.durationFrames, trackType: 'audio',
+      ...(c.explicitSpan ? { startFrame: spanStartAbs } : {}),
+    });
+  }
+
+  // Turnover markers (EDL * LOC: locators, OTIO Marker objects) → authored
+  // timeline markers. Interchange colors map to the measured Resolve names;
+  // unknown colors fall back to Blue. Frames are timeline-absolute like cuts.
+  const markers = markerEvents
+    .map((e) => ({
+      frame: ORIGIN + (toTl(e.recIn, e.fps) - minRec),
+      color: COLOR_MAP[String(e.color || '').toLowerCase()] || 'Blue',
+      ...(e.name ? { name: e.name } : {}),
+    }))
+    .filter((m) => m.frame >= (preserveStartTimecode ? startFrame : DEFAULT_ORIGIN));
+
+  // BL legs with surviving extent (a fade-in's zero-length slug GROWS through
+  // the boundary shift; one that never met a dissolve stays zero and drops
+  // out). srcIn was only scaffolding for the shift math — strip it.
+  const elements = blackLegs
+    .filter((el) => el.durationFrames > 0)
+    .map(({ srcIn: _srcIn, ...rest }) => rest);
+
+  return {
+    spec: { timelineName, media, ...(preserveStartTimecode ? { startFrame } : {}), ...(markers.length ? { markers } : {}), ...(transitions.length ? { transitions } : {}), ...(elements.length ? { elements } : {}) },
+    report: {
+      videoEvents: vids.length,
+      sources: media.length,
+      audioEventsSkipped: audioSkipped,
+      authoredMarkers: markers.length,
+      audioChannelLegsMerged,
+      // Compound clips flattened out of nested OTIO Stacks (E120): named so
+      // the ledger says which compounds became flat cuts.
+      flattenedCompounds: [...new Set(events.filter((e) => e.fromCompound).map((e) => e.fromCompound))],
+      flattenedCompoundEvents: events.filter((e) => e.fromCompound).length,
+      unresolvedCompounds,
+      unresolvedGenerators,
+      authoredAudioEvents: audioPlacements.length,
+      audioRetimesSkipped,
+      audioLanesBeyondCeiling,
+      ...(elements.length || audioBlackLegsSkipped ? {
+        blackLegs: { authoredGenerators: elements.length, audioSilenceLegsSkipped: audioBlackLegsSkipped },
+      } : {}),
+      upperTrackCutsVideoOnly: placements.filter((pl) => pl.track > 1 && !isBL(pl.source)).length,
+      flattenedRetimes,
+      authoredRetimes,
+      authoredTransitions: transitions,
+      droppedTransitions,
+      origin: startFrame,
+    },
+  };
+}
+
 export function eventsToEDL(events, opts = {}) {
   const fps = opts.fps || events.find((e) => e.fps)?.fps || 24;
-  const vids = events.filter((e) => e.track !== 'A').sort((a, b) => (a.recIn ?? 0) - (b.recIn ?? 0));
+  const vids = events.filter((e) => e.track !== 'A').sort((a, b) => (a.recIn ?? 0) - (b.recIn ?? 0) || (a.recOut ?? 0) - (b.recOut ?? 0));
   const lines = [`TITLE: ${opts.name || 'CONFORMED'}`, 'FCM: NON-DROP FRAME'];
+  const reelOf = (e) =>
+    String(e.source || 'AX')
+      .split(/[\\/]/).pop()
+      .replace(/\.[^.]+$/, '')
+      .replace(/[^A-Za-z0-9]/g, '')
+      .slice(0, 8)
+      .toUpperCase() || 'AX';
+  let num = 0;
   vids.forEach((e, i) => {
-    const num = pad(i + 1, 3);
-    const reel =
-      String(e.source || 'AX')
-        .replace(/\.[^.]+$/, '')
-        .replace(/[^A-Za-z0-9]/g, '')
-        .slice(0, 8)
-        .toUpperCase() || 'AX';
-    lines.push(
-      `${num}  ${reel} V     C        ${framesToTc(e.srcIn, fps)} ${framesToTc(e.srcOut, fps)} ${framesToTc(e.recIn, fps)} ${framesToTc(e.recOut, fps)}`,
-    );
+    const reel = reelOf(e);
+    // Transitions write the CMX pair (E101 — the OTIO writer carried them
+    // since day one, this writer silently dropped them): a zero-length cut
+    // of the OUTGOING at the junction, then the D line with the duration.
+    // Fades work identically with the BL reel on the black side.
+    if (e.transition && (e.transition.duration || 0) > 0) {
+      const prev = vids.find((o) => o !== e && (o.recOut ?? 0) === (e.recIn ?? 0) && (o.recIn ?? 0) < (o.recOut ?? 0));
+      const outReel = prev ? reelOf(prev) : 'BL';
+      const outSrc = prev ? framesToTc(prev.srcOut, fps) : framesToTc(0, fps);
+      lines.push(
+        `${pad(++num, 3)}  ${outReel} V     C        ${outSrc} ${outSrc} ${framesToTc(e.recIn, fps)} ${framesToTc(e.recIn, fps)}`,
+      );
+      // A zero-length BL carrier (OTIO/AAF fade-out shape) gets the fade's
+      // own record extent — the CMX fade-out convention.
+      const recOut = (e.recIn ?? 0) === (e.recOut ?? 0) ? (e.recIn ?? 0) + Math.round(e.transition.duration) : e.recOut;
+      lines.push(
+        `${pad(++num, 3)}  ${reel} V     D    ${String(Math.round(e.transition.duration)).padStart(3, '0')} ${framesToTc(e.srcIn, fps)} ${framesToTc(e.srcOut, fps)} ${framesToTc(e.recIn, fps)} ${framesToTc(recOut, fps)}`,
+      );
+    } else {
+      if ((e.recIn ?? 0) === (e.recOut ?? 0)) return; // zero-length markers are emitted by the transition pair itself
+      lines.push(
+        `${pad(++num, 3)}  ${reel} V     C        ${framesToTc(e.srcIn, fps)} ${framesToTc(e.srcOut, fps)} ${framesToTc(e.recIn, fps)} ${framesToTc(e.recOut, fps)}`,
+      );
+    }
     if ((e.speed ?? 100) !== 100 || e.reverse) {
       const play = (e.reverse ? -1 : 1) * (fps * ((e.speed ?? 100) / 100));
       lines.push(`M2   ${reel}       ${play.toFixed(1)}             ${framesToTc(e.srcIn, fps)}`);
@@ -247,7 +853,13 @@ export function drtFlattenedRetimes(events) {
 /** Build a buildDRT spec (Resolve-native .drt) from normalized events. */
 export function eventsToDrtSpec(events, opts = {}) {
   const fps = opts.fps || events.find((e) => e.fps)?.fps || 24;
-  const groups = byTrack(events);
+  // BL legs are OMITTED on this flat target (E102): a 'BL' mediaFilePath
+  // would author a bogus offline clip, while an empty track region renders
+  // black anyway — the same picture without the media-offline lie. (The
+  // fade transitions themselves flatten on DRT by design; use
+  // drt.assemble_from_interchange for a .drt that AUTHORS them.)
+  const isBLev = (e) => /^(BL|BLACK)$/i.test(String(e.source || '').trim());
+  const groups = byTrack(events.filter((e) => !isBLev(e)));
   const mkTrack = (list) => ({
     clips: list.map((e) => ({ start: e.recIn ?? 0, duration: (e.recOut ?? 0) - (e.recIn ?? 0), in: e.srcIn ?? 0, mediaFilePath: e.source || '' })),
   });
@@ -284,7 +896,359 @@ export async function authorInterchange(events, target, opts = {}) {
   if (t === 'drt') {
     const spec = eventsToDrtSpec(events, opts);
     const buf = await drt().buildDRT(spec);
-    return { target: 'drt', spec, buffer: buf, bytes: buf.length, flattened: drtFlattenedRetimes(events) };
+    const blackLegsOmitted = events.filter((e) => /^(BL|BLACK)$/i.test(String(e.source || '').trim())).length;
+    return {
+      target: 'drt', spec, buffer: buf, bytes: buf.length, flattened: drtFlattenedRetimes(events),
+      ...(blackLegsOmitted ? { blackLegsOmitted } : {}),
+    };
   }
   throw new Error(`authorInterchange: unknown target '${target}' (otio|edl|drt)`);
+}
+
+/**
+ * verifyRoundtrip — assert that a re-EXPORT of an authored timeline matches
+ * the interchange it was built from, normalizing the three cross-format
+ * conventions measured on a live AAF→assemble→import→OTIO-export loop
+ * (19.1.3.7):
+ *   1. track labels: first tracks read 'V'/'A' in one format, 'V1'/'A1' in
+ *      the other — canonicalized to the numbered form;
+ *   2. source names: AAF mob name vs file basename ('rt_source_1' vs
+ *      'rt_source_1.mov') — compared after stripping the extension,
+ *      case-insensitively;
+ *   3. source frames: Resolve's OTIO export is TIMECODE-ABSOLUTE while
+ *      event lists are usually source-relative — a CONSTANT per-source
+ *      offset is fitted from the first pair and every other pair must agree
+ *      (the offset itself is reported, e.g. 86400 for a 01:00:00:00 source).
+ * Record positions are min-anchored per side. Video events only (audio
+ * channel legs merge by design).
+ *
+ * @returns {{pass:boolean, pairs:number, srcOffsets:Object, mismatches:Array}}
+ */
+export function verifyRoundtrip(inputEvents, exportedEvents, opts = {}) {
+  const recTol = opts.recTol ?? 1;
+  const srcTol = opts.srcTol ?? 1;
+  const canonTrack = (t) => {
+    const m = /^([VA])(\d+)?$/.exec(String(t || ''));
+    return m ? `${m[1]}${m[2] || '1'}` : String(t);
+  };
+  // Basename + extension-stripped + case-folded: an OTIO turnover names
+  // sources by target_url PATH while Resolve's re-export names them by file
+  // basename (measured E100) — same file, different spelling.
+  const canonSource = (x) => String(x || '').split(/[\\/]/).pop().replace(/\.[^.]+$/, '').toLowerCase();
+  // Reel/tape aliases: an EDL names sources by REEL (CUTSRC) while the
+  // re-export names them by file basename (cut_src) — the sourceMap that
+  // drove the assemble is the authority linking the two. Keys and values
+  // canonicalize exactly like event sources.
+  const aliases = {};
+  for (const [k, v] of Object.entries(opts.sourceAliases || {})) aliases[canonSource(k)] = canonSource(v);
+  // RELINK + REALIGN laws (E146): the changelist already knows how an
+  // offline→online turnover renames its media (proxies "4K-2K" → masters
+  // "4K", ".mp4" → ".mov"; E141) and how a conform re-centres a cut inside
+  // an unchanged dissolve (E142). A round-trip verify that ignores them
+  // reports 191 source mismatches on a real reel whose picture is the same.
+  // Run the changelist once, adopt its inferred aliases, and let its
+  // junction_realigned list excuse the record edges it explains.
+  const changelistAliases = [];
+  const realignedJunctions = [];
+  if (opts.inferAliases !== false) {
+    try {
+      const explicit = Object.entries(opts.sourceAliases || {}).map(([from, to]) => ({ from, to }));
+      const d = diffChangelist(inputEvents, exportedEvents, { sourceAliases: explicit, inferAliases: true });
+      for (const a of d.sourceAliases || []) {
+        if (!a.inferred) continue;
+        changelistAliases.push(a);
+        if (aliases[canonSource(a.from)] === undefined) aliases[canonSource(a.from)] = canonSource(a.to);
+      }
+      for (const c of d.changes || []) if (c.kind === 'junction_realigned') realignedJunctions.push(c);
+    } catch {
+      /* the changelist is advisory here — a verify never fails because the diff could not run */
+    }
+  }
+  const mapSource = (s) => aliases[s] ?? s;
+  // recOut > recIn: an EDL dissolve writes a ZERO-duration outgoing leg
+  // before the D event — a pairing placeholder, never a rendered clip, and
+  // no export reproduces it.
+  const vids = (evts) => evts.filter((e) => /^V\d*$/.test(String(e.track)) && e.recIn != null && e.recOut != null && e.recOut > e.recIn);
+  const audsOf = (evts) => evts.filter((e) => /^A\d*$/.test(String(e.track)) && e.recIn != null && e.recOut != null && e.recOut > e.recIn);
+  // The record origin anchors on real PICTURE: a named generator leg (a
+  // counting leader at 0) is synthetic and an export may drop it (E146), and
+  // an anchor that moved with it would slide every later cut by its length.
+  const isNamedGenerator = (e) => Boolean(e.generatorName) && !/^(black|black video|solid color|slug)$/i.test(String(e.generatorName));
+  const anchorOfSide = (evts) => {
+    const v = vids(evts).filter((e) => !isNamedGenerator(e));
+    if (v.length) return Math.min(...v.map((e) => e.recIn));
+    const vg = vids(evts);
+    if (vg.length) return Math.min(...vg.map((e) => e.recIn));
+    const au = audsOf(evts);
+    return au.length ? Math.min(...au.map((e) => e.recIn)) : 0;
+  };
+  const norm = (evts, pick = vids) => {
+    const v = pick(evts);
+    if (!v.length) return [];
+    const off = anchorOfSide(evts);
+    return v
+      .map((e) => ({ track: canonTrack(e.track), source: mapSource(canonSource(e.source)), recIn: e.recIn - off, recOut: e.recOut - off, srcIn: e.srcIn ?? 0, speed: e.speed ?? 100, reverse: Boolean(e.reverse), color: e.color && typeof e.color === 'object' ? { r: Number(e.color.r) || 0, g: Number(e.color.g) || 0, b: Number(e.color.b) || 0 } : null, compound: e.compound || null, fromCompound: e.fromCompound || null, generatorName: e.generatorName || null }))
+      .sort((a, b) => a.track.localeCompare(b.track) || a.recIn - b.recIn);
+  };
+  // FADES (E94): BL legs on the input side and the Solid Color generators a
+  // fade conform authors for them are the same thing — BLACK. Black segments
+  // are synthesized filler whose extents follow from the picture boundaries,
+  // so the pairwise compare runs over PICTURE legs only; black is counted
+  // informationally. And a fade's boundary-shift legitimately moves a
+  // picture edge by up to the transition duration (matching Resolve's own
+  // start-at-cut reshaping), so an edge within an input junction's fade
+  // window is excused — and reported, not silently absorbed.
+  // A black generator by any name (E145: Premiere's Black Video, a slug) is black too.
+  const isBlackSeg = (e) => /^(bl|black|solid color|black video|black matte|slug)$/.test(e.source) || Boolean(e.generatorName && /^(black|black video|solid color|slug)$/i.test(e.generatorName));
+  const inAnchor = anchorOfSide(inputEvents);
+  const exAnchor = anchorOfSide(exportedEvents);
+  // A record edge that the changelist folded into a junction_realigned is
+  // the same picture — excused and reported, like a fade reshape.
+  const junctionRealigned = [];
+  const realignedEdge = (edgeIn, edgeExp, track) => realignedJunctions.some((c) => canonTrack(c.track) === track
+    && Math.abs((c.oldRecIn - inAnchor) - edgeIn) <= recTol && Math.abs((c.newRecIn - exAnchor) - edgeExp) <= recTol);
+  const junctionsFor = (trackRe) => inputEvents
+    .filter((e) => trackRe.test(String(e.track)) && e.recIn != null && e.transition && e.transition.duration > 0)
+    .map((e) => ({ frame: e.recIn - inAnchor, d: e.transition.duration }));
+  const fadeReshapedBoundaries = [];
+  const mismatches = [];
+  const srcOffsets = {};
+  const comparePairs = (a, b, junctions, trackType) => {
+    const tt = trackType === 'audio' ? { trackType: 'audio' } : {};
+    const inFadeWindow = (edgeIn, edgeExp) => junctions.some(
+      (j) => Math.abs(edgeIn - j.frame) <= j.d && Math.abs(edgeExp - edgeIn) <= j.d,
+    );
+    if (a.length !== b.length) mismatches.push({ kind: 'count', ...tt, input: a.length, exported: b.length });
+    // PAIRING BY WINDOW (E147): cuts pair the way the changelist pairs them —
+    // same track + source, closest record position, each consumed once — so
+    // one clip the export lost is ONE 'missing' (and an export-only clip one
+    // 'extra'), not a track/source/record cascade over every cut after it.
+    // A real reel with one dropped clip reported 48 such cascade mismatches.
+    // A cut whose window is held by a DIFFERENT source on the other side is
+    // still a 'source' mismatch (a swapped shot), found by window.
+    const P = pairEvents(a, b, recTol);
+    const byInput = new Map(P.pairs.map((pr) => [pr.oe, pr.ne]));
+    // PER-SOURCE OFFSET = the source's DOMINANT offset (E151), not the first
+    // pair's: with the first pair's, two shifted cuts of fifty-five set the
+    // expectation and fifty-three unchanged cuts read as source-frames drift
+    // on a real reel. Fit the offset net of the record shift for every pair
+    // of a source, take the mode, and judge each cut against it.
+    const offsetOf = (x, y) => (y.srcIn - (y.recIn - x.recIn)) - x.srcIn;
+    const modeOf = new Map();
+    for (const { oe: x, ne: y } of P.pairs) {
+      if (x.track !== y.track || x.source !== y.source) continue;
+      const off = offsetOf(x, y);
+      if (!modeOf.has(x.source)) modeOf.set(x.source, new Map());
+      modeOf.get(x.source).set(off, (modeOf.get(x.source).get(off) || 0) + 1);
+    }
+    for (const [src, tally] of modeOf) {
+      if (srcOffsets[src] === undefined) srcOffsets[src] = [...tally].sort((p1, p2) => p2[1] - p1[1] || Math.abs(p1[0]) - Math.abs(p2[0]))[0][0];
+    }
+    const takenNew = new Set(P.pairs.map((pr) => pr.ne));
+    const unmatchedNew = new Set(P.unmatchedNew);
+    let n = 0;
+    for (let i = 0; i < a.length; i += 1) {
+      const x = a[i];
+      let y = byInput.get(x);
+      if (!y) {
+        const swap = [...unmatchedNew].find((e) => e.track === x.track && Math.abs(e.recIn - x.recIn) <= recTol && Math.abs(e.recOut - x.recOut) <= recTol);
+        if (swap) { unmatchedNew.delete(swap); takenNew.add(swap); mismatches.push({ kind: 'source', ...tt, at: i, input: x.source, exported: swap.source, record: [x.recIn, x.recOut] }); continue; }
+        mismatches.push({ kind: 'missing', ...tt, at: i, source: x.source, track: x.track, record: [x.recIn, x.recOut] });
+        continue;
+      }
+      n += 1;
+      if (x.track !== y.track) { mismatches.push({ kind: 'track', ...tt, at: i, input: x.track, exported: y.track }); continue; }
+      if (x.source !== y.source) { mismatches.push({ kind: 'source', ...tt, at: i, input: x.source, exported: y.source }); continue; }
+      const inBad = Math.abs(x.recIn - y.recIn) > recTol;
+      const outBad = Math.abs(x.recOut - y.recOut) > recTol;
+      if (inBad || outBad) {
+        const inRealigned = inBad && realignedEdge(x.recIn, y.recIn, x.track);
+        const outRealigned = outBad && realignedEdge(x.recOut, y.recOut, x.track);
+        const inExcused = !inBad || inRealigned || inFadeWindow(x.recIn, y.recIn);
+        const outExcused = !outBad || outRealigned || inFadeWindow(x.recOut, y.recOut);
+        if ((inRealigned || outRealigned) && inExcused && outExcused) {
+          junctionRealigned.push({ at: i, ...tt, source: x.source, input: [x.recIn, x.recOut], exported: [y.recIn, y.recOut] });
+        } else if (inExcused && outExcused) {
+          fadeReshapedBoundaries.push({ at: i, ...tt, source: x.source, input: [x.recIn, x.recOut], exported: [y.recIn, y.recOut] });
+        } else {
+          mismatches.push({ kind: 'record', ...tt, at: i, input: [x.recIn, x.recOut], exported: [y.recIn, y.recOut] });
+          continue;
+        }
+      }
+      // RETIMES (E95): a conform that lost its retime is a wrong timeline
+      // that record/source geometry alone cannot catch (the record extent is
+      // unchanged; only the playback rate is). Resolve's EXPORT_OTIO carries
+      // an authored Sm2TimeMap back as LinearTimeWarp (measured live: 50%
+      // in → time_scalar 0.5 out), so a speed/reverse mismatch is real drift.
+      if (Math.abs((x.speed ?? 100) - (y.speed ?? 100)) > 0.5 || x.reverse !== y.reverse) {
+        mismatches.push({
+          kind: 'retime', ...tt, at: i, source: x.source,
+          input: { speed: x.speed, reverse: x.reverse },
+          exported: { speed: y.speed, reverse: y.reverse },
+        });
+        continue;
+      }
+      // A fade-reshaped head trims record AND source together (source stays
+      // record-aligned), so the per-source constant offset is fitted net of
+      // the record shift — otherwise a source cut both plain and faded would
+      // read as a source-frames drift.
+      const off = offsetOf(x, y);
+      if (srcOffsets[x.source] === undefined) srcOffsets[x.source] = off;
+      else if (Math.abs(off - srcOffsets[x.source]) > srcTol) {
+        mismatches.push({ kind: 'source-frames', ...tt, at: i, source: x.source, expectedOffset: srcOffsets[x.source], gotOffset: off });
+      }
+    }
+    for (const e of unmatchedNew) mismatches.push({ kind: 'extra', ...tt, source: e.source, track: e.track, record: [e.recIn, e.recOut] });
+    return n;
+  };
+
+  const a0 = norm(inputEvents);
+  const b0 = norm(exportedEvents);
+  // GENERATOR COLOUR (E112): a black leg is only "black" by default — an
+  // XMEML fillcolor rides on it (fade-to-white, colour mattes; E110), and
+  // Resolve's FCP7 writer emits the colour back. Black legs still merge out
+  // of the pairwise geometry compare (their extents follow the picture), but
+  // every input leg that CARRIES a colour must find an exported leg on the
+  // same track overlapping its span with the same colour — a white fade that
+  // came back black is a conform error geometry alone cannot see.
+  const generatorColours = { compared: 0, mismatches: [] };
+  const colourKey = (c) => (c ? [c.r, c.g, c.b].map((v) => Math.round(v * 255)).join(',') : '0,0,0');
+  const colourTol = 1 / 255 + 1e-9;
+  const sameColour = (x, y) => ['r', 'g', 'b'].every((k) => Math.abs((x ? x[k] : 0) - (y ? y[k] : 0)) <= colourTol);
+  // Which writers can WITNESS a generator colour (measured, E112/E117):
+  // Resolve's FCP7 XML export echoes it (`input_1`); its OTIO export writes
+  // a Solid Color as a Clip with a NULL media_reference and empty metadata —
+  // no colour anywhere — and an EDL/DRT re-export carries none either. A
+  // colour compare against such an export can only ever "fail", so it is
+  // reported as generatorColourNotInExport instead (like markersNotInExport).
+  const exportedFormat = String(opts.exportedFormat || '').toLowerCase();
+  const colourCapable = exportedFormat === '' || /^(xml|xmeml|fcp7|fcpxml)$/.test(exportedFormat);
+  let generatorColourNotInExport = false;
+  {
+    const inLegs = a0.filter((e) => isBlackSeg(e) && e.color);
+    if (inLegs.length && !colourCapable) generatorColourNotInExport = true;
+    const exLegs = b0.filter((e) => isBlackSeg(e));
+    for (const leg of generatorColourNotInExport ? [] : inLegs) {
+      const partner = exLegs.find((x) => x.track === leg.track && x.recIn < leg.recOut && x.recOut > leg.recIn);
+      generatorColours.compared += 1;
+      if (!partner) {
+        generatorColours.mismatches.push({ kind: 'generator-colour', track: leg.track, record: [leg.recIn, leg.recOut], input: colourKey(leg.color), exported: null });
+      } else if (!sameColour(leg.color, partner.color)) {
+        generatorColours.mismatches.push({ kind: 'generator-colour', track: leg.track, record: [leg.recIn, leg.recOut], input: colourKey(leg.color), exported: colourKey(partner.color) });
+      }
+    }
+  }
+  // COMPOUNDS COLLAPSED BY THE EXPORT (E123): Resolve's FCP7 writer flattens
+  // a compound to one media-less clipitem (E121) while an OTIO turnover
+  // flattens the compound's inner cuts (E120). An exported compound whose
+  // span covers input cuts flattened FROM that same compound is not drift —
+  // the export simply cannot show the inside. Those cuts and the collapsed
+  // item leave the pairwise compare and the result names the compound.
+  const compoundsCollapsedInExport = [];
+  const collapsedIn = new Set();
+  const collapsedEx = new Set();
+  for (const ex of b0) {
+    if (!ex.compound) continue;
+    const inner = a0.filter((e) => e.fromCompound && canonSource(e.fromCompound) === canonSource(ex.compound) && e.track === ex.track && e.recIn < ex.recOut && e.recOut > ex.recIn);
+    if (!inner.length) continue;
+    compoundsCollapsedInExport.push({ name: ex.compound, track: ex.track, record: [ex.recIn, ex.recOut], innerCuts: inner.length });
+    for (const e of inner) collapsedIn.add(e);
+    collapsedEx.add(ex);
+  }
+  // GENERATORS THE EXPORT DOES NOT CARRY (E146): a named generator leg on
+  // the input (a counting leader) that no exported event of the same name
+  // covers is a capability hole the bridge already names
+  // (unresolvedGenerators) — reported as generatorsNotInExport, never a
+  // count/index cascade over every cut that follows it.
+  const generatorsNotInExport = [];
+  const genMissing = new Set();
+  for (const e of a0) {
+    if (!e.generatorName || isBlackSeg(e) || collapsedIn.has(e)) continue;
+    const partner = b0.find((x) => x.track === e.track && x.source === e.source && x.recIn < e.recOut && x.recOut > e.recIn);
+    if (partner) continue;
+    genMissing.add(e);
+    generatorsNotInExport.push({ name: e.generatorName, track: e.track, record: [e.recIn, e.recOut] });
+  }
+  const a = a0.filter((e) => !isBlackSeg(e) && !collapsedIn.has(e) && !genMissing.has(e));
+  const b = b0.filter((e) => !isBlackSeg(e) && !collapsedEx.has(e));
+  const blackSegments = { input: a0.length - a.length - genMissing.size, exported: b0.length - b.length };
+  const n = comparePairs(a, b, junctionsFor(/^V\d*$/), 'video');
+
+  // AUDIO (E97): compared only when the INPUT declares audio events — a
+  // video-only turnover legitimately re-exports with audio (the A1
+  // convenience mirror), which is reported informationally, never failed.
+  // AAF channel legs dedupe (the same source/range arrives once per channel
+  // slot — on numbered lanes since E109, so the key ignores the lane the way
+  // the bridge's placement merge does); BL/silence legs merge out like black.
+  const dedupeAud = (list) => {
+    const seen = new Set();
+    return list.filter((e) => {
+      const k = `${e.source}|${e.recIn}|${e.recOut}|${e.srcIn}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  };
+  const aa = dedupeAud(norm(inputEvents, audsOf).filter((e) => !isBlackSeg(e)));
+  const ba = dedupeAud(norm(exportedEvents, audsOf).filter((e) => !isBlackSeg(e)));
+  let audio;
+  let audioNotInExport = false;
+  if (aa.length && !ba.length) {
+    // The export carries NO audio at all while the input declares some: a
+    // capability gap (Resolve's EXPORT_EDL is video-only, measured E105),
+    // reported as audioNotInExport rather than failed — like markers.
+    audio = { input: aa.length, exported: 0, compared: false, note: 'export carries no audio events (format capability, e.g. EDL is video-only) — not compared' };
+    audioNotInExport = true;
+  } else if (aa.length) {
+    audio = { input: aa.length, exported: ba.length, compared: true };
+    comparePairs(aa, ba, junctionsFor(/^A\d*$/), 'audio');
+  } else if (ba.length) {
+    audio = { input: 0, exported: ba.length, compared: false, note: 'export-only audio (A1 convenience mirror) — not compared' };
+  }
+  // MARKERS (E88): compare track-'MARKER' pseudo-events, min-anchored to
+  // each side's own VIDEO record origin like everything else. When the
+  // re-export carries NO markers at all while the input has them, that is
+  // reported as markersNotInExport rather than failed — several export
+  // formats drop markers wholesale, and a missing capability is not a
+  // conform drift. When both sides carry markers, they compare strictly.
+  const mks = (evts, anchor) => evts
+    .filter((e) => String(e.track) === 'MARKER' && e.recIn != null)
+    .map((e) => ({ frame: e.recIn - anchor, name: e.name || '' }))
+    .sort((x, y) => x.frame - y.frame);
+  const anchorOf = (evts) => {
+    const v = vids(evts);
+    return v.length ? Math.min(...v.map((e) => e.recIn)) : 0;
+  };
+  const am = mks(inputEvents, anchorOf(inputEvents));
+  const bm = mks(exportedEvents, anchorOf(exportedEvents));
+  const markers = { input: am.length, exported: bm.length, mismatches: [] };
+  let markersNotInExport = false;
+  if (am.length && !bm.length) {
+    markersNotInExport = true;
+  } else {
+    if (am.length !== bm.length) markers.mismatches.push({ kind: 'marker-count', input: am.length, exported: bm.length });
+    for (let i = 0; i < Math.min(am.length, bm.length); i += 1) {
+      if (Math.abs(am[i].frame - bm[i].frame) > recTol) {
+        markers.mismatches.push({ kind: 'marker-frame', at: i, input: am[i].frame, exported: bm[i].frame });
+      } else if (am[i].name && bm[i].name && am[i].name !== bm[i].name) {
+        markers.mismatches.push({ kind: 'marker-name', at: i, input: am[i].name, exported: bm[i].name });
+      }
+    }
+    mismatches.push(...markers.mismatches);
+  }
+  mismatches.push(...generatorColours.mismatches);
+  return {
+    pass: mismatches.length === 0, pairs: n, srcOffsets, mismatches, markers,
+    sourceAliases: [...Object.entries(opts.sourceAliases || {}).map(([from, to]) => ({ from, to, inferred: false })), ...changelistAliases],
+    junctionRealigned,
+    generatorsNotInExport,
+    ...(generatorColours.compared ? { generatorColours } : {}),
+    ...(generatorColourNotInExport ? { generatorColourNotInExport } : {}),
+    ...(compoundsCollapsedInExport.length ? { compoundsCollapsedInExport } : {}),
+    ...(markersNotInExport ? { markersNotInExport } : {}),
+    ...(blackSegments.input || blackSegments.exported ? { blackSegments } : {}),
+    ...(fadeReshapedBoundaries.length ? { fadeReshapedBoundaries } : {}),
+    ...(audio ? { audio } : {}),
+    ...(audioNotInExport ? { audioNotInExport } : {}),
+  };
 }

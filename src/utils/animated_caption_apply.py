@@ -15,7 +15,10 @@ from __future__ import annotations
 import uuid
 import math
 import re
+import sys
 from typing import Any, Dict, Iterable, List, Mapping, Optional
+
+from src.utils.resolve_writes import describe_switch_failure, set_current_timeline
 
 
 class AnimatedCaptionApplyError(ValueError):
@@ -693,10 +696,13 @@ def apply_animated_caption_plan(
                 ) from exc
         raise
     finally:
-        try:
-            project.SetCurrentTimeline(original_current_timeline or destination_timeline)
-        except Exception:
-            pass
+        restore_ok, restore_detail = set_current_timeline(
+            project, original_current_timeline or destination_timeline
+        )
+        if not restore_ok and sys.exc_info()[0] is None:
+            raise AnimatedCaptionApplyError(
+                describe_switch_failure(restore_detail, "restoring the original timeline")
+            )
 
     return {
         "success": True,

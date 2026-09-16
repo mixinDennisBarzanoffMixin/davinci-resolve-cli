@@ -86,6 +86,27 @@ function _decodeKeyframePoint(buf) {
  */
 function _decodeKeyframes(hex) {
   if (hex == null) return { origin: { recordSec: 0, sourceSec: 0 }, keyframes: [] };
+  // r19 KEYED-DICT form (E144): Resolve 19.1.3.7 itself writes KeyframesBA
+  // as a keyed dict of keyed-dict keyframes ({interp,YOut,YIn,Y,XOut,XIn,X}
+  // under keys '0','1',…) on every retime it makes (XMEML import, UI speed
+  // change, EDL M2 freeze) — the same shape buildConstantSpeedTimemapKeyed
+  // emits — while an EXPORT_DRT of a hand-conformed reel carried protobuf
+  // points. The reader used to throw on the keyed form ("unsupported wire
+  // type 7"), so a Resolve-made retime read as unknown. Keyframe 0 at X=0 is
+  // the origin (its Y = the source second the map starts on: 4.0 on a real
+  // ramp harvest); the rest are the points.
+  const kh = String(hex).replace(/[^0-9a-fA-F]/g, '');
+  if (kh.startsWith('00000001')) {
+    const pts = [];
+    for (const e of decodeKeyedDict(Buffer.from(kh, 'hex')).entries) {
+      const inner = decodeKeyedDict(Buffer.from(String(e.value), 'hex')).entries;
+      const get = (k) => { const f = inner.find((x) => x.key === k); return f ? Number(f.value) : 0; };
+      pts.push({ recordSec: get('X'), sourceSec: get('Y') });
+    }
+    pts.sort((a, b) => a.recordSec - b.recordSec);
+    const origin = pts.length && pts[0].recordSec === 0 ? pts.shift() : { recordSec: 0, sourceSec: 0 };
+    return { origin, keyframes: pts, keyed: true };
+  }
   const fields = decodeProtobuf(hex);
   const originField = fields.find((f) => f.field === 2 && f.wire === 1);
   const originSource = originField
@@ -120,7 +141,7 @@ function decodeTimemap(input) {
     const get = (k) => { const e = entries.find((x) => x.key === k); return e ? e.value : undefined; };
     const recordDurationSec = get('XMax');
     const sourceDurationSec = get('LastValidYOffset');
-    const { origin, keyframes } = _decodeKeyframes(get('KeyframesBA'));
+    const { origin, keyframes, keyed } = _decodeKeyframes(get('KeyframesBA'));
     const segments = _segments(keyframes, origin);
     // The EXACT speed lives in the keyframe ratios (source/record per segment); XMax and
     // LastValidYOffset are frame-quantized. `speed` is the first segment's (whole clip if 1 kf);
@@ -128,7 +149,7 @@ function decodeTimemap(input) {
     const speed = segments.length ? segments[0].speed : sourceDurationSec / recordDurationSec;
     const variable = segments.length > 1;
     return {
-      form: 'retimed', variable, speed, segments, keyframes,
+      form: 'retimed', variable, speed, segments, keyframes, origin, keyframeForm: keyed ? 'keyed' : 'protobuf',
       sourceDurationSec, recordDurationSec, entries,
     };
   }
@@ -209,8 +230,157 @@ function buildConstantSpeedTimemap({ speed, sourceDurationSec, uniqueId, recordD
   });
 }
 
+/**
+ * r19-generation constant-speed Sm2TimeMap. Resolve 19.x encodes KeyframesBA
+ * as a keyed-dict of keyed-dict keyframes ({interp,YOut,YIn,Y,XOut,XIn,X}),
+ * NOT the R21 protobuf points — and 19 silently IGNORES the protobuf form on
+ * import (measured: item read back at 100%). Shape harvested from a live
+ * 19.1.3.7 XMEML retime and rebuilt byte-exact. The map spans the ENTIRE
+ * source stretched by 1/speed (the clip's Start/Duration/In window into it):
+ *   YMax = (sourceFrames-1)/fps          — full source extent, seconds
+ *   XMax = (sourceFrames/speed - 1)/fps  — full retimed extent, seconds
+ *   kf0 = (0,0); kf1 = (XMax, XMax*speed); linear (zero handles, interp 0)
+ *
+ * @param {object} p
+ * @param {number} p.speed        - source/record ratio (0.5 = 50%). Forward only.
+ * @param {number} p.sourceFrames - full source frame count at p.fps.
+ * @param {number} [p.fps=24]
+ * @param {string} p.uniqueId     - fresh uuid (bare, no braces).
+ * @returns {Buffer}
+ */
+function buildConstantSpeedTimemapKeyed({ speed, sourceFrames, fps = 24, uniqueId, reverse = false }) {
+  if (!(speed > 0)) throw new RangeError('buildConstantSpeedTimemapKeyed: speed must be > 0 (pass reverse:true for backwards)');
+  if (!Number.isInteger(sourceFrames) || sourceFrames < 1) throw new TypeError('buildConstantSpeedTimemapKeyed: sourceFrames must be a positive integer');
+  const YMax = (sourceFrames - 1) / fps;
+  const XMax = (sourceFrames / speed - 1) / fps;
+  const kf = (X, Y) => encodeKeyedDict({ hdr: 1, entries: [
+    { key: 'interp', type: 0x02, subType: 0, value: 0 },
+    { key: 'YOut', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'YIn', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'Y', type: T_DOUBLE, subType: 0, value: Y },
+    { key: 'XOut', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'XIn', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'X', type: T_DOUBLE, subType: 0, value: X },
+  ] }).toString('hex');
+  // Reverse (harvested from a live 19.1.3.7 -100% XMEML retime): the SAME
+  // envelope with the Y endpoints swapped — kf0=(0, YMax), kf1=(XMax, 0),
+  // a descending line. Forward keeps kf1 Y = XMax*speed (harvest: +half-frame
+  // convention falls out of the arithmetic, byte-exact either way).
+  const keyframes = encodeKeyedDict({ hdr: 1, entries: [
+    { key: '1', type: T_BYTES, subType: 0, value: reverse ? kf(XMax, 0) : kf(XMax, XMax * speed) },
+    { key: '0', type: T_BYTES, subType: 0, value: reverse ? kf(0, YMax) : kf(0, 0) },
+  ] }).toString('hex');
+  return encodeKeyedDict({ hdr: 1, entries: [
+    { key: 'YMax', type: T_DOUBLE, subType: 0, value: YMax },
+    { key: 'XMax', type: T_DOUBLE, subType: 0, value: XMax },
+    { key: 'UniqueId', type: T_STRING, subType: 0, value: uniqueId },
+    { key: 'LastValidYOffset', type: T_DOUBLE, subType: 0, value: YMax },
+    { key: 'KeyframesBA', type: T_BYTES, subType: 0, value: keyframes },
+    { key: 'DbType', type: T_STRING, subType: 0, value: 'Sm2TimeMap' },
+  ] });
+}
+
+/**
+ * FREEZE frame map — r19 keyed form, harvested from a live 19.1.3.7 EDL
+ * `M2 <reel> 000.0` import (E55, 2026-08-31; render-proven frozen by
+ * freezedetect). A real freeze is NOT the flat frame-domain line the earlier
+ * synthetic attempt used (that one reads back frozen but RENDERS moving —
+ * the readback-blind divergence measured in E41-era work). The engine's
+ * shape is a flat line in SECONDS with two extra conventions:
+ *
+ *   YMin = YMax = Y(kf0) = Y(kf1) = frozen source position in SECONDS
+ *   XMax = 60000 (a fixed sentinel domain, not the clip length)
+ *   LastValidYOffset = (sourceFrames-1)/fps  (whole-source extent, as always)
+ *
+ * The clip's <In> is EMPTY on a frozen item (record windowing does not
+ * apply to a constant map). Byte-exact vs the harvest for equal inputs.
+ */
+function buildFreezeTimemapKeyed({ freezeFrame, sourceFrames, fps = 24, uniqueId }) {
+  if (!Number.isInteger(freezeFrame) || freezeFrame < 0) throw new TypeError('buildFreezeTimemapKeyed: freezeFrame must be a non-negative integer (source frame to hold)');
+  if (!Number.isInteger(sourceFrames) || sourceFrames < 1) throw new TypeError('buildFreezeTimemapKeyed: sourceFrames must be a positive integer');
+  if (freezeFrame >= sourceFrames) throw new RangeError(`buildFreezeTimemapKeyed: freezeFrame ${freezeFrame} outside source (${sourceFrames} frames)`);
+  const freezeSec = freezeFrame / fps;
+  const XMAX_SENTINEL = 60000;
+  const kf = (X, Y) => encodeKeyedDict({ hdr: 1, entries: [
+    { key: 'interp', type: 0x02, subType: 0, value: 0 },
+    { key: 'YOut', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'YIn', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'Y', type: T_DOUBLE, subType: 0, value: Y },
+    { key: 'XOut', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'XIn', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'X', type: T_DOUBLE, subType: 0, value: X },
+  ] }).toString('hex');
+  const keyframes = encodeKeyedDict({ hdr: 1, entries: [
+    { key: '1', type: T_BYTES, subType: 0, value: kf(XMAX_SENTINEL, freezeSec) },
+    { key: '0', type: T_BYTES, subType: 0, value: kf(0, freezeSec) },
+  ] }).toString('hex');
+  return encodeKeyedDict({ hdr: 1, entries: [
+    { key: 'YMin', type: T_DOUBLE, subType: 0, value: freezeSec },
+    { key: 'YMax', type: T_DOUBLE, subType: 0, value: freezeSec },
+    { key: 'XMax', type: T_DOUBLE, subType: 0, value: XMAX_SENTINEL },
+    { key: 'UniqueId', type: T_STRING, subType: 0, value: uniqueId },
+    { key: 'LastValidYOffset', type: T_DOUBLE, subType: 0, value: (sourceFrames - 1) / fps },
+    { key: 'KeyframesBA', type: T_BYTES, subType: 0, value: keyframes },
+    { key: 'DbType', type: T_STRING, subType: 0, value: 'Sm2TimeMap' },
+  ] });
+}
+
+/**
+ * VARIABLE-SPEED RAMP — piecewise-constant speed segments as a multi-keyframe
+ * r19 keyed Sm2TimeMap. E63 (2026-08-31): the engine honors intermediate
+ * keyframes with the SAME seconds-domain conventions as the constant maps —
+ * a synthesized 3-keyframe 50%→100% ramp read back source 0..36 over 48
+ * record frames AND rendered with exactly the predicted cadence (11/23
+ * doubled frames in the 50% window, 0/24 at 100%). Record domain starts at
+ * the cut head (clip In stays 0); srcIn bakes into the first keyframe's Y.
+ *
+ * @param {Array<{durationFrames:number, speed:number}>} segments - record-domain
+ *   pieces, in order from the cut head; speeds are source/record multipliers.
+ */
+function buildRampTimemapKeyed({ segments, srcIn = 0, sourceFrames, fps = 24, uniqueId }) {
+  if (!Array.isArray(segments) || segments.length < 2) throw new TypeError('buildRampTimemapKeyed: segments must be an array of >= 2 {durationFrames, speed} pieces (use speed/freeze for a single one)');
+  if (!Number.isInteger(sourceFrames) || sourceFrames < 1) throw new TypeError('buildRampTimemapKeyed: sourceFrames must be a positive integer');
+  if (!Number.isInteger(srcIn) || srcIn < 0) throw new TypeError('buildRampTimemapKeyed: srcIn must be a non-negative integer');
+  const kf = (X, Y) => encodeKeyedDict({ hdr: 1, entries: [
+    { key: 'interp', type: 0x02, subType: 0, value: 0 },
+    { key: 'YOut', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'YIn', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'Y', type: T_DOUBLE, subType: 0, value: Y },
+    { key: 'XOut', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'XIn', type: T_DOUBLE, subType: 0, value: 0 },
+    { key: 'X', type: T_DOUBLE, subType: 0, value: X },
+  ] }).toString('hex');
+  let x = 0;
+  let y = srcIn / fps;
+  const points = [[x, y]];
+  for (const [i, seg] of segments.entries()) {
+    if (!Number.isInteger(seg.durationFrames) || seg.durationFrames < 1) throw new TypeError(`buildRampTimemapKeyed: segments[${i}].durationFrames must be a positive integer`);
+    if (!(seg.speed > 0)) throw new RangeError(`buildRampTimemapKeyed: segments[${i}].speed must be > 0 (freeze/reverse segments are not authorable in a ramp)`);
+    x += seg.durationFrames / fps;
+    y += (seg.durationFrames * seg.speed) / fps;
+    points.push([x, y]);
+  }
+  const sourceEnd = y * fps;
+  if (sourceEnd > sourceFrames) {
+    throw new RangeError(`buildRampTimemapKeyed: ramp consumes source frame ${Math.ceil(sourceEnd)} but the media has ${sourceFrames}`);
+  }
+  const entries = points.map(([X, Y], i) => ({ key: String(i), type: T_BYTES, subType: 0, value: kf(X, Y) })).reverse();
+  const keyframes = encodeKeyedDict({ hdr: 1, entries }).toString('hex');
+  const [XMax, YMax] = points[points.length - 1];
+  return encodeKeyedDict({ hdr: 1, entries: [
+    { key: 'YMax', type: T_DOUBLE, subType: 0, value: YMax },
+    { key: 'XMax', type: T_DOUBLE, subType: 0, value: XMax },
+    { key: 'UniqueId', type: T_STRING, subType: 0, value: uniqueId },
+    { key: 'LastValidYOffset', type: T_DOUBLE, subType: 0, value: (sourceFrames - 1) / fps },
+    { key: 'KeyframesBA', type: T_BYTES, subType: 0, value: keyframes },
+    { key: 'DbType', type: T_STRING, subType: 0, value: 'Sm2TimeMap' },
+  ] });
+}
+
 module.exports = {
   decodeTimemap, encodeTimemap, encodeRetimedTimemap,
-  identityTimemap, buildConstantSpeedTimemap, buildTimemap, decodeProtobuf,
+  identityTimemap, buildConstantSpeedTimemap, buildConstantSpeedTimemapKeyed,
+  buildFreezeTimemapKeyed, buildRampTimemapKeyed,
+  buildTimemap, decodeProtobuf,
   TYPE_LINEAR,
 };

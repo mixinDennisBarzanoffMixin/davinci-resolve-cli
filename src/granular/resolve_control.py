@@ -1,6 +1,8 @@
 """Resolve control resources, inspection helpers, and app-level tools."""
 
 from src.granular.common import *  # noqa: F401,F403
+import os
+from src.utils import typed_api_search
 
 resolve = ResolveProxy()
 
@@ -226,6 +228,7 @@ def save_layout_preset_tool(preset_name: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@granular_destructive_op()
 def load_layout_preset_tool(preset_name: str) -> Dict[str, Any]:
     """Load a UI layout preset.
 
@@ -280,6 +283,7 @@ def import_layout_preset_tool(import_path: str, preset_name: str = None) -> Dict
 
 
 @mcp.tool()
+@granular_destructive_op()
 def delete_layout_preset_tool(preset_name: str) -> Dict[str, Any]:
     """Delete a layout preset.
 
@@ -323,6 +327,7 @@ def get_app_state_endpoint() -> Dict[str, Any]:
 
 
 @mcp.tool()
+@granular_destructive_op()
 def quit_app(force: bool = False, save_project: bool = True) -> str:
     """
     Quit DaVinci Resolve application.
@@ -344,6 +349,7 @@ def quit_app(force: bool = False, save_project: bool = True) -> str:
 
 
 @mcp.tool()
+@granular_destructive_op()
 def restart_app(wait_seconds: int = 5) -> str:
     """
     Restart DaVinci Resolve application.
@@ -513,6 +519,7 @@ def get_keyframe_mode() -> Dict[str, Any]:
 
 
 @mcp.tool()
+@granular_destructive_op()
 def set_keyframe_mode(mode: int) -> Dict[str, Any]:
     """Set the keyframe mode in Resolve.
 
@@ -543,6 +550,7 @@ def get_fairlight_presets() -> Dict[str, Any]:
 
 
 @mcp.tool()
+@granular_destructive_op()
 def quit_resolve() -> Dict[str, Any]:
     """Quit DaVinci Resolve. WARNING: This will close the application."""
     resolve = get_resolve()
@@ -589,6 +597,7 @@ def get_burn_in_preset_list() -> Dict[str, Any]:
 
 
 @mcp.tool()
+@granular_destructive_op()
 def delete_burn_in_preset(preset_name: str) -> Dict[str, Any]:
     """Delete a data burn-in preset by name (Resolve 21.0.4+).
 
@@ -639,6 +648,7 @@ def save_user_preferences_preset(preset_name: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@granular_destructive_op()
 def load_user_preferences_preset(preset_name: str) -> Dict[str, Any]:
     """Load a user-preferences preset (Resolve 21.0.4+).
 
@@ -660,6 +670,7 @@ def load_user_preferences_preset(preset_name: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@granular_destructive_op()
 def delete_user_preferences_preset(preset_name: str) -> Dict[str, Any]:
     """Delete a user-preferences preset by name (Resolve 21.0.4+).
 
@@ -719,3 +730,48 @@ def export_user_preferences_preset(preset_name: str, export_path: str) -> Dict[s
         return missing
     result = resolve.ExportUserPreferencesPreset(preset_name, export_path)
     return {"success": bool(result), "preset_name": preset_name, "export_path": export_path}
+
+
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def search_resolve_api(pattern: str, kind: str = "all", limit: int = 50) -> Dict[str, Any]:
+    """Search the shipped Resolve 21.1 typed API stub. Needs no connection.
+
+    `api_truth` answers what is broken; this answers what exists. Each hit also
+    reports whether THIS server references the method and in which files, so a
+    search doubles as a parity check.
+
+    Args:
+        pattern: Case-insensitive regular expression, e.g. "marker" or "(Get|Set)Setting".
+        kind: 'all' (default), 'methods', or 'options' for TypedDicts only.
+        limit: Maximum results per section (capped at 200).
+    """
+    try:
+        return typed_api_search.search(_PROJECT_DIR, pattern, kind=kind, limit=limit)
+    except typed_api_search.TypedApiError as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def describe_resolve_api(symbol: str) -> Dict[str, Any]:
+    """Full typed detail for one Resolve API symbol. Needs no connection.
+
+    Args:
+        symbol: 'Class.Method' (e.g. "Project.GetName"), a bare method name when
+            it is unambiguous, or a TypedDict name (e.g. "RenderSettings").
+    """
+    try:
+        return typed_api_search.describe(_PROJECT_DIR, symbol)
+    except typed_api_search.TypedApiError as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def get_resolve_api_surface() -> Dict[str, Any]:
+    """Counts and object list for the shipped typed stub. Needs no connection."""
+    try:
+        return typed_api_search.summary(_PROJECT_DIR)
+    except typed_api_search.TypedApiError as exc:
+        return {"error": str(exc)}

@@ -7,6 +7,7 @@ capture is a *read*: page, playhead, current timeline, gallery, and the temp
 directory all come back the way the caller left them.
 """
 import base64
+import json
 import os
 import unittest
 from unittest import mock
@@ -239,21 +240,26 @@ class CaptureRenderTest(unittest.TestCase):
     """quality='frame' — the default, and the only frame-accurate route."""
 
     def _capture(self, params, rendering=False, job="job-1", status="Complete",
-                 write=True, ffmpeg="/usr/bin/ffmpeg"):
+                 write=True, ffmpeg="/usr/bin/ffmpeg", marks=None, mode=1, mode_switch=True):
         """Returns (result, project mock, list of SetRenderSettings payloads)."""
         resolve = _FakeResolve(page="color")
         tl = _fake_timeline(resolve)
         tl.GetStartFrame.return_value = 86400
         tl.GetEndFrame.return_value = 86544
+        tl.GetMarkInOut.return_value = marks if marks is not None else {}
         proj = mock.Mock()
         proj.IsRenderingInProgress.side_effect = [rendering, False]
+        proj.GetCurrentRenderMode.return_value = mode
+        proj.SetCurrentRenderMode.return_value = mode_switch
         proj.GetCurrentRenderFormatAndCodec.return_value = {"format": "mov", "codec": "H.264"}
         proj.GetRenderCodecs.return_value = {"JPEG": "YUV420_8"}
         proj.SetCurrentRenderFormatAndCodec.return_value = True
         proj.SetRenderSettings.return_value = True
         proj.AddRenderJob.return_value = job
         proj.StartRendering.return_value = True
-        proj.GetRenderJobStatus.return_value = {"JobStatus": status}
+        proj.GetRenderJobStatus.return_value = (
+            status if isinstance(status, dict) else {"JobStatus": status}
+        )
 
         calls = []
         target = {}
@@ -265,7 +271,7 @@ class CaptureRenderTest(unittest.TestCase):
                 target["name"] = payload["CustomName"]
             return True
 
-        def _start(jobs, **kwargs):
+        def _start(jobs, interactive=False, **kwargs):
             # Resolve writes the file during the render, and appends the frame
             # number to CustomName.
             if write and target:
@@ -309,8 +315,32 @@ class CaptureRenderTest(unittest.TestCase):
             ("mov", "H.264"),
         )
 
-    def test_mark_range_is_reset_to_the_whole_timeline(self):
-        # It cannot be truly restored (no GetRenderSettings), but it must not be
+    def test_individual_clips_mode_is_forced_to_single_clip_and_restored(self):
+        # Measured 2026-09-09: in "Individual clips" mode (0) the single-frame
+        # capture rendered the WHOLE clip under Resolve's own naming and the
+        # expected file never appeared ("reported success, wrote no file").
+        out, proj, _ = self._capture({"frame": 86424}, mode=0)
+        self.assertIsInstance(out, Image)
+        modes = [c.args[0] for c in proj.SetCurrentRenderMode.call_args_list]
+        self.assertEqual(modes, [1, 0])
+        # the switch happens before the job is added, the restore after
+        self.assertLess(
+            proj.method_calls.index(mock.call.SetCurrentRenderMode(1)),
+            proj.method_calls.index(mock.call.AddRenderJob()),
+        )
+
+    def test_single_clip_mode_is_left_alone(self):
+        out, proj, _ = self._capture({"frame": 86424}, mode=1)
+        self.assertIsInstance(out, Image)
+        proj.SetCurrentRenderMode.assert_not_called()
+
+    def test_refused_mode_switch_is_an_error_before_any_job(self):
+        out, proj, _ = self._capture({"frame": 86424}, mode=0, mode_switch=False)
+        self.assertEqual(out["error"]["code"], "RENDER_MODE_REFUSED")
+        proj.AddRenderJob.assert_not_called()
+
+    def test_mark_range_falls_back_to_the_whole_timeline(self):
+        # No marks were set, so there is nothing to restore. It must still not be
         # left pinned to the captured frame.
         out, _, calls = self._capture({"frame": 86424})
         self.assertIsInstance(out, Image)
@@ -318,12 +348,70 @@ class CaptureRenderTest(unittest.TestCase):
         self.assertEqual(calls[-1]["MarkIn"], 86400)
         self.assertEqual(calls[-1]["MarkOut"], 86544)
 
+    def test_an_existing_mark_range_is_restored(self):
+        out, _, calls = self._capture(
+            {"frame": 86424}, marks={"video": {"in": 86410, "out": 86500},
+                                     "audio": {"in": 86410, "out": 86500}})
+        self.assertIsInstance(out, Image)
+        self.assertFalse(calls[-1]["SelectAllFrames"])
+        self.assertEqual(calls[-1]["MarkIn"], 86410)
+        self.assertEqual(calls[-1]["MarkOut"], 86500)
+
+    def test_a_relative_mark_range_is_offset_by_the_timeline_start(self):
+        # GetMarkInOut reports marks relative to the timeline start (Resolve's
+        # own example is in=0/out=134) while SetRenderSettings takes absolute
+        # record frames; on 19.1.3.7 a MarkIn below the start is silently
+        # clamped to the start. A relative range must come back offset.
+        out, _, calls = self._capture(
+            {"frame": 86424}, marks={"video": {"in": 10, "out": 100},
+                                     "audio": {"in": 10, "out": 100}})
+        self.assertIsInstance(out, Image)
+        self.assertFalse(calls[-1]["SelectAllFrames"])
+        self.assertEqual(calls[-1]["MarkIn"], 86410)
+        self.assertEqual(calls[-1]["MarkOut"], 86500)
+
+    def test_a_half_set_mark_range_is_not_treated_as_a_range(self):
+        # Only an in point: restoring it as a range would invent an out point.
+        out, _, calls = self._capture({"frame": 86424},
+                                      marks={"video": {"in": 86410}})
+        self.assertIsInstance(out, Image)
+        self.assertTrue(calls[-1]["SelectAllFrames"])
+        self.assertEqual(calls[-1]["MarkIn"], 86400)
+
+    def test_an_unreadable_mark_range_does_not_break_the_capture(self):
+        out, _, calls = self._capture({"frame": 86424}, marks="not a dict")
+        self.assertIsInstance(out, Image)
+        self.assertTrue(calls[-1]["SelectAllFrames"])
+
     def test_refuses_while_another_render_runs(self):
         out, _, _ = self._capture({}, rendering=True)
         self.assertEqual(out["error"]["code"], "RENDER_BUSY")
 
     def test_failed_render_is_reported(self):
         out, _, _ = self._capture({}, status="Failed")
+        self.assertEqual(out["error"]["code"], "RENDER_FAILED")
+
+    def test_localized_complete_status_is_not_a_failure(self):
+        # Issue #191: JobStatus follows the UI language ("Concluso" on an
+        # Italian install), so the English literal must not decide success —
+        # the job's numeric completion and the written file do.
+        out, _, _ = self._capture({}, status={
+            "JobStatus": "Concluso", "CompletionPercentage": 100,
+            "TimeTakenToRenderInMs": 1225,
+        })
+        self.assertFalse(isinstance(out, dict) and out.get("error"), out)
+
+    def test_localized_failed_status_is_still_a_failure(self):
+        out, _, _ = self._capture({}, status={
+            "JobStatus": "Fallito", "CompletionPercentage": 37,
+            "Error": "Media a piena risoluzione non trovato",
+        })
+        self.assertEqual(out["error"]["code"], "RENDER_FAILED")
+        self.assertIn("Media a piena risoluzione", json.dumps(out, default=str))
+
+    def test_localized_status_short_of_100_percent_is_a_failure(self):
+        # No Error field and no recognisable word: the percentage decides.
+        out, _, _ = self._capture({}, status={"JobStatus": "Annullato", "CompletionPercentage": 62})
         self.assertEqual(out["error"]["code"], "RENDER_FAILED")
 
     def test_success_without_a_file_is_reported(self):
