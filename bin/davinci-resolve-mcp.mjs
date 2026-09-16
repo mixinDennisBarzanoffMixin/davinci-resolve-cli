@@ -731,7 +731,17 @@ function commandCli(args) {
 }
 
 function commandAdvanced(args) {
-  const entry = path.join(PACKAGE_ROOT, "resolve-advanced", "cli.mjs");
+  // The managed tree is also where setup provisions the advanced runtime's
+  // dependencies.  This matters for a global install sourced from a local
+  // checkout: npm links the package instead of putting its dependencies next
+  // to that checkout, so running the packaged entry directly cannot resolve
+  // imports such as zod even though `dvr sync` reports the runtime ready.
+  const root = syncManagedInstall(installRoot());
+  const runtime = reportAdvancedRuntime(root, { provision: true });
+  if (!runtime.bootable) {
+    process.exit(1);
+  }
+  const entry = path.join(root, "resolve-advanced", "cli.mjs");
   run(process.execPath, [entry, ...args], { cwd: process.cwd() });
 }
 

@@ -130,6 +130,14 @@ class ManagedSyncTest(unittest.TestCase):
             self.assertTrue(
                 (root / "resolve-advanced" / "server" / "index.mjs").is_file())
 
+    def test_advanced_cli_runs_from_the_provisioned_managed_tree(self):
+        source = BOOTSTRAP.read_text(encoding="utf-8")
+        start = source.index("function commandAdvanced(args)")
+        end = source.index("\nfunction commandSync", start)
+        command = source[start:end]
+        self.assertIn("syncManagedInstall(installRoot())", command)
+        self.assertIn('path.join(root, "resolve-advanced", "cli.mjs")', command)
+
 
 @requires_node
 class AdvancedBinPreflightTest(unittest.TestCase):
