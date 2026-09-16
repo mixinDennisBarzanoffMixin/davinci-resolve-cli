@@ -1,6 +1,6 @@
 ---
 name: resolve-mcp
-description: Orientation and index for DaVinci Resolve MCP work — grading, editing, conforming, delivery, media analysis, and .drp/.drt/.drx file work, live in a running Resolve or offline with none open. Load this for a map of the domain skills, the live-vs-offline servers, and the cross-cutting safety rules. The per-domain skills (resolve-color / resolve-edit / resolve-conform / resolve-delivery / resolve-media-analysis) carry the depth and self-trigger on their own descriptions; use this as the map, or when a task spans several domains.
+description: Orientation and index for DaVinci Resolve CLI and MCP work — inspecting sessions, grading, editing, conforming, delivery, media analysis, and .drp/.drt/.drx file work, live in a running Resolve or offline with none open. Load this when using the dvr command, the davinci-resolve MCP server, or several Resolve domains together. Per-domain skills carry the detailed workflows.
 ---
 
 # DaVinci Resolve MCP — Index
@@ -9,6 +9,31 @@ Orientation for any Resolve MCP task. This is the **map, not the depth** — eac
 domain skill below carries its own routing and triggers on its own `description`.
 Open the one that matches, or use this when a task spans several domains. This
 skill does not auto-load the others; it points at them.
+
+## CLI and MCP are two front doors to the same implementation
+
+- Prefer the registered `davinci-resolve` MCP tools when they are available in
+  the current Codex session; their schemas and safety annotations are already
+  exposed to the agent.
+- Use the global `dvr` command for shell composition, machine-readable output,
+  discovery, durable batches, and environments where MCP tools are not exposed.
+- Do not guess tool/action names. Discover them with `dvr tools`,
+  `dvr actions TOOL`, or `dvr describe TOOL` before constructing a new call.
+- Keep automation output machine-readable with `--compact` or JSON input via
+  `--input`; use `--raw` only when a command documents the requested scalar.
+
+For a live session, establish the read-only baseline before editing:
+
+```text
+dvr doctor
+dvr --compact resolve_control get_version
+dvr --compact resolve_control runtime_mode
+```
+
+`dvr doctor` must report a connected Resolve for live operations. Offline
+advanced operations do not require Resolve, but their capability gates still
+apply. A failed connection is a diagnosis task, not permission to restart,
+close, or reconfigure the user's session without authorization.
 
 ## Two servers — compute offline, apply live
 

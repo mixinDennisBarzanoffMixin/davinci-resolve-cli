@@ -1,0 +1,11 @@
+interface:
+  display_name: "DaVinci Resolve CLI"
+  short_description: "Control Resolve safely through dvr and MCP"
+  default_prompt: "Use $resolve-mcp to inspect the current DaVinci Resolve session and choose the safest CLI or MCP workflow."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "davinci-resolve"
+      description: "Local DaVinci Resolve MCP server for live Studio control"
+policy:
+  allow_implicit_invocation: true
