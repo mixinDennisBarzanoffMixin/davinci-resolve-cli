@@ -136,6 +136,7 @@ class ManagedSyncTest(unittest.TestCase):
         end = source.index("\nfunction commandSync", start)
         command = source[start:end]
         self.assertIn("syncManagedInstall(installRoot())", command)
+        self.assertIn("provisionAdvancedDeps(root)", command)
         self.assertIn('path.join(root, "resolve-advanced", "cli.mjs")', command)
 
 

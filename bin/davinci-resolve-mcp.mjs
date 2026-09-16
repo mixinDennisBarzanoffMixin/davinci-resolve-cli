@@ -737,8 +737,12 @@ function commandAdvanced(args) {
   // to that checkout, so running the packaged entry directly cannot resolve
   // imports such as zod even though `dvr sync` reports the runtime ready.
   const root = syncManagedInstall(installRoot());
-  const runtime = reportAdvancedRuntime(root, { provision: true });
+  // Keep stdout reserved for the advanced CLI's machine-readable payload.
+  // The reporting helper intentionally prints a human status line, which
+  // would otherwise corrupt JSON consumers such as `jq` and PowerShell.
+  const runtime = provisionAdvancedDeps(root);
   if (!runtime.bootable) {
+    reportAdvancedRuntime(root, { provision: false });
     process.exit(1);
   }
   const entry = path.join(root, "resolve-advanced", "cli.mjs");
