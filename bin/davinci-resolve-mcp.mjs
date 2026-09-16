@@ -372,8 +372,17 @@ function advancedRuntimeStatus(root) {
   };
 }
 
-function npmCommand() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
+function npmCommandLine() {
+  // Node cannot execute .cmd shims directly on Windows (spawnSync returns
+  // EINVAL). Route the fixed npm invocation through cmd.exe explicitly rather
+  // than enabling shell parsing for the whole command.
+  if (process.platform === "win32") {
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", "npm.cmd"],
+    };
+  }
+  return { command: "npm", args: [] };
 }
 
 /**
@@ -396,9 +405,10 @@ function provisionAdvancedDeps(root, { force = false } = {}) {
     return { ...before, ran: false, reason: "already provisioned" };
   }
 
+  const npm = npmCommandLine();
   const result = spawnSync(
-    npmCommand(),
-    ["install", "--omit=dev", "--omit=optional", "--no-audit", "--no-fund"],
+    npm.command,
+    [...npm.args, "install", "--omit=dev", "--omit=optional", "--no-audit", "--no-fund"],
     { cwd: advancedRoot(root), stdio: ["ignore", "inherit", "inherit"], encoding: "utf8" }
   );
 
