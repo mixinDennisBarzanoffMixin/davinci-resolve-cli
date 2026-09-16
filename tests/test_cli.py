@@ -36,6 +36,29 @@ class ParameterParsingTests(unittest.TestCase):
 
 
 class OutputTests(unittest.TestCase):
+    class _Stream:
+        def __init__(self, encoding):
+            self.encoding = encoding
+            self.calls = []
+
+        def reconfigure(self, **kwargs):
+            self.calls.append(kwargs)
+            if "encoding" in kwargs:
+                self.encoding = kwargs["encoding"]
+
+    def test_windows_code_page_is_reconfigured_for_unicode_output(self):
+        out, err = self._Stream("cp1252"), self._Stream("cp1252")
+        with patch.object(cli.sys, "stdout", out), patch.object(cli.sys, "stderr", err):
+            cli._ensure_utf8_stdio()
+        for stream in (out, err):
+            self.assertEqual(stream.calls, [{"encoding": "utf-8", "errors": "replace"}])
+
+    def test_utf8_stream_is_left_unchanged(self):
+        out = self._Stream("utf-8")
+        with patch.object(cli.sys, "stdout", out), patch.object(cli.sys, "stderr", out):
+            cli._ensure_utf8_stdio()
+        self.assertEqual(out.calls, [])
+
     def _emit(self, value, **kwargs):
         out = io.StringIO()
         with redirect_stdout(out):
