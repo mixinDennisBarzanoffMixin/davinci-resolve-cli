@@ -463,6 +463,20 @@ def normalize(value: Any) -> Any:
     return str(value)
 
 
+def strip_operation_metadata(value: Any) -> Any:
+    """Remove lifecycle envelopes from machine-readable results on request."""
+    normalized = normalize(value)
+    if isinstance(normalized, dict):
+        return {
+            key: strip_operation_metadata(item)
+            for key, item in normalized.items()
+            if key != "_operation"
+        }
+    if isinstance(normalized, list):
+        return [strip_operation_metadata(item) for item in normalized]
+    return normalized
+
+
 def _parse_scalar(raw: str) -> Any:
     text = raw.strip()
     if not text:
@@ -651,6 +665,7 @@ def _global_options(argv: List[str]) -> tuple[List[str], Dict[str, Any]]:
         "inputs": [],
         "sets": [],
         "yes": False,
+        "data_only": False,
     }
     rest: List[str] = []
     i = 0
@@ -683,6 +698,8 @@ def _global_options(argv: List[str]) -> tuple[List[str], Dict[str, Any]]:
             opts["pretty"] = False
         elif token == "--yes":
             opts["yes"] = True
+        elif token == "--data-only":
+            opts["data_only"] = True
         else:
             rest.append(token)
         i += 1
@@ -740,9 +757,11 @@ def _resource_rows(surface: str) -> List[Dict[str, Any]]:
 
 
 def _usage() -> str:
-    return f"""DaVinci Resolve CLI {VERSION} — the complete MCP surface for Bash
+    return f"""DaVinci Resolve CLI {VERSION} — the complete Resolve automation surface
 
 Usage:
+  dvr inspect [item_limit=N]                current live project in one call
+  dvr search QUERY [--surface ...]          bounded tool/action discovery
   dvr tools [--surface compound|granular|all]
   dvr describe TOOL [ACTION] [--surface compound|granular]
   dvr actions TOOL
@@ -751,7 +770,7 @@ Usage:
   dvr granular TOOL [PARAM ...]            direct granular tool
   dvr prompts | prompt NAME [PARAM ...]
   dvr resources | resource URI
-  dvr completion bash|zsh|fish
+  dvr completion bash|zsh|fish|powershell
   dvr session                              persistent JSONL request loop
 
 Parameters:
@@ -764,7 +783,13 @@ Parameters:
 Output (stdout contains data only):
   -o, --output json|jsonl|raw|shell
   --pretty | --compact
+  --data-only           recursively omit _operation lifecycle metadata
   --raw PATH             dot path such as jobs.0.id (implies raw output)
+
+PowerShell:
+  Quote @file inputs: dvr TOOL ACTION --input '@request.json'
+  Native filtering:  dvr inspect --data-only | ConvertFrom-Json
+  Optional jq:        dvr inspect --data-only | jq '.current_timeline'
 
 Session JSONL (one response envelope per request; registries/connection stay warm):
   {{"id":1,"tool":"timeline","action":"get_current","params":{{}}}}
@@ -780,12 +805,12 @@ Exit codes: 0 success, 1 tool error/refusal, 2 usage/input, 3 internal, 130 inte
 
 
 _TOP_LEVEL_COMMANDS = (
-    "tools", "describe", "actions", "call", "granular", "prompts", "prompt",
+    "inspect", "search", "tools", "describe", "actions", "call", "granular", "prompts", "prompt",
     "resources", "resource", "completion", "session", "advanced", "batch", "production",
     "setup", "doctor", "server", "control-panel", "help", "version",
 )
 _COMMON_PARAMETER_FLAGS = (
-    "--input", "--set", "--output", "--raw", "--pretty", "--compact", "--yes",
+    "--input", "--set", "--output", "--raw", "--pretty", "--compact", "--data-only", "--yes",
 )
 
 
@@ -850,7 +875,7 @@ def completion_candidates(words: List[str]) -> List[str]:
     complete_raw = words[:-1]
     complete: List[str] = []
     value_options = {"--surface", "--output", "-o", "--raw", "--input", "-i", "--set", "-s"}
-    flag_options = {"--pretty", "--compact", "--yes"}
+    flag_options = {"--pretty", "--compact", "--data-only", "--yes"}
     index = 0
     while index < len(complete_raw):
         token = complete_raw[index]
@@ -892,7 +917,7 @@ def completion_candidates(words: List[str]) -> List[str]:
                 tool = granular.get(complete[1])
                 candidates = [*_COMMON_PARAMETER_FLAGS, *_schema_flags(getattr(tool, "parameters", None))]
         elif command == "completion":
-            candidates = ["bash", "zsh", "fish"]
+            candidates = ["bash", "zsh", "fish", "powershell"]
         elif command == "production":
             if len(complete) == 1:
                 candidates = [
@@ -953,7 +978,209 @@ complete -c dvr -f -a '(__dvr_complete)'
 complete -c davinci-resolve -f -a '(__dvr_complete)'
 complete -c davinci-resolve-cli -f -a '(__dvr_complete)'
 """
-    raise CliUsageError("completion shell must be bash, zsh, or fish")
+    if shell == "powershell":
+        return r"""Register-ArgumentCompleter -Native -CommandName dvr,davinci-resolve,davinci-resolve-cli -ScriptBlock {
+  param($wordToComplete, $commandAst, $cursorPosition)
+  $words = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.Extent.Text })
+  if ($commandAst.ToString().EndsWith(' ')) { $words += '' }
+  dvr __complete @words 2>$null | ForEach-Object {
+    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+  }
+}
+"""
+    raise CliUsageError("completion shell must be bash, zsh, fish, or powershell")
+
+
+def _command_usage(command: str) -> str:
+    rows = {
+        "inspect": "Usage: dvr inspect [item_limit=N] [folder_depth=0..4] [include_paths=true] [full=true]\n"
+                   "Returns a bounded read-only snapshot of Resolve, the current project, timeline, tracks, and Media Pool.\n",
+        "search": "Usage: dvr search QUERY [--surface compound|granular|all]\n"
+                  "Searches tool and action names without printing the full tool catalog.\n",
+        "tools": "Usage: dvr tools [--surface compound|granular|all]\n"
+                 "Prints the complete tool catalog; prefer `dvr search QUERY` for bounded discovery.\n",
+    }
+    return rows.get(command, _usage())
+
+
+def _brief_clip(item: Dict[str, Any], include_paths: bool) -> Dict[str, Any]:
+    keys = (
+        "timeline_item_id", "name", "track_type", "track_index", "start", "end",
+        "duration", "source_fps", "file_exists", "media_status",
+    )
+    out = {key: item.get(key) for key in keys if key in item}
+    if include_paths and "file_path" in item:
+        out["file_path"] = item.get("file_path")
+    return out
+
+
+def _brief_timeline(value: Any, item_limit: int, include_paths: bool) -> Any:
+    value = strip_operation_metadata(value)
+    if not isinstance(value, dict) or result_is_error(value):
+        return value
+    tracks_out: Dict[str, Any] = {}
+    tracks = value.get("tracks") or {}
+    for track_type, group in tracks.items():
+        rows = []
+        for track in (group or {}).get("tracks", []):
+            items = track.get("items") or []
+            rows.append({
+                "track_index": track.get("track_index"),
+                "item_count": track.get("item_count", len(items)),
+                "items": [_brief_clip(item, include_paths) for item in items[:item_limit]],
+                "items_truncated": len(items) > item_limit,
+            })
+        tracks_out[track_type] = {
+            "track_count": (group or {}).get("track_count", len(rows)),
+            "tracks": rows,
+        }
+    keys = ("name", "id", "start_frame", "end_frame", "start_timecode")
+    out = {key: value.get(key) for key in keys if key in value}
+    if "item_count" in value:
+        out["track_item_count"] = value.get("item_count")
+    if isinstance(value.get("start_frame"), int) and isinstance(value.get("end_frame"), int):
+        out["duration_frames"] = value["end_frame"] - value["start_frame"]
+    media_ids = {
+        item.get("media_pool_item_id")
+        for group in tracks.values()
+        for track in (group or {}).get("tracks", [])
+        for item in (track.get("items") or [])
+        if item.get("media_pool_item_id")
+    }
+    out["unique_media_count"] = len(media_ids)
+    out["tracks"] = tracks_out
+    markers = value.get("markers") or {}
+    out["marker_count"] = len(markers) if isinstance(markers, dict) else None
+    return out
+
+
+def _brief_folder(folder: Any, clip_limit: int, include_paths: bool) -> Any:
+    if not isinstance(folder, dict):
+        return folder
+    clips = folder.get("clips") or []
+    return {
+        "name": folder.get("name"),
+        "id": folder.get("id"),
+        "clip_count": folder.get("clip_count", len(clips)),
+        "clips": [{
+            **{key: clip.get(key) for key in ("name", "id", "type", "duration") if key in clip},
+            **({"file_path": clip.get("file_path")} if include_paths and "file_path" in clip else {}),
+        } for clip in clips[:clip_limit]],
+        "clips_truncated": len(clips) > clip_limit,
+        "subfolder_count": folder.get("subfolder_count", len(folder.get("subfolders") or [])),
+        "subfolders": [_brief_folder(child, clip_limit, include_paths) for child in (folder.get("subfolders") or [])],
+        "truncated": folder.get("truncated", False),
+    }
+
+
+async def inspect_live_project(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a bounded, operation-metadata-free snapshot of the live project."""
+    item_limit = params.get("item_limit", 10)
+    folder_depth = params.get("folder_depth", 1)
+    full = params.get("full", False)
+    include_paths = params.get("include_paths", False)
+    if not isinstance(item_limit, int) or isinstance(item_limit, bool) or not 0 <= item_limit <= 1000:
+        raise CliUsageError("inspect item_limit must be an integer from 0 to 1000")
+    if not isinstance(folder_depth, int) or isinstance(folder_depth, bool) or not 0 <= folder_depth <= 4:
+        raise CliUsageError("inspect folder_depth must be an integer from 0 to 4")
+    if not isinstance(include_paths, bool):
+        raise CliUsageError("inspect include_paths must be true or false")
+
+    async def read(tool: str, action: str, action_params: Optional[Dict[str, Any]] = None) -> Any:
+        try:
+            return strip_operation_metadata(await call_registered_tool(
+                "compound", tool, {"action": action, "params": action_params or {}},
+            ))
+        except Exception as exc:
+            return {"error": {"type": type(exc).__name__, "message": str(exc)}}
+
+    runtime = await read("resolve_control", "runtime_mode")
+    if not isinstance(runtime, dict) or result_is_error(runtime) or runtime.get("running") is False:
+        return {
+            "error": {"message": "Resolve is not available for live inspection"},
+            "runtime": runtime,
+        }
+    version = await read("resolve_control", "get_version")
+    if not isinstance(version, dict) or result_is_error(version):
+        return {
+            "error": {"message": "Resolve version check failed"},
+            "runtime": runtime,
+            "resolve": version,
+        }
+    page = await read("resolve_control", "get_page")
+    project = await read("project_manager", "get_current")
+    resolve = {
+        key: version.get(key) for key in ("product", "version_string")
+        if isinstance(version, dict) and key in version
+    }
+    if isinstance(runtime, dict):
+        resolve.update({
+            key: runtime.get(key) for key in ("running", "instances", "database")
+            if key in runtime
+        })
+        resolve["ui_mode"] = (
+            "headless" if runtime.get("headless") is True
+            else "gui" if runtime.get("headless") is False
+            else "unknown"
+        )
+    if isinstance(page, dict) and "page" in page:
+        resolve["page"] = page["page"]
+    if not isinstance(project, dict) or result_is_error(project) or not project.get("name"):
+        return {
+            "error": {"message": "No current Resolve project is available"},
+            "resolve": resolve,
+            "project": project,
+        }
+    timelines = await read("timeline", "list")
+    current_timeline = await read("timeline", "probe_timeline_structure")
+    media_pool = await read("media_pool", "probe_media_pool", {"depth": folder_depth})
+
+    if full:
+        return {
+            "resolve": version,
+            "runtime": runtime,
+            "page": page,
+            "project": project,
+            "timelines": timelines,
+            "current_timeline": current_timeline,
+            "media_pool": media_pool,
+        }
+
+    pool = media_pool
+    if isinstance(media_pool, dict) and not result_is_error(media_pool):
+        pool = {
+            "root": _brief_folder(media_pool.get("root"), item_limit, include_paths),
+            "current_folder": (media_pool.get("current_folder") or {}).get("name"),
+            "selected_clip_count": len(media_pool.get("selected_clips") or []),
+        }
+    return {
+        "resolve": resolve or version,
+        "project": project,
+        "timelines": timelines,
+        "current_timeline": _brief_timeline(current_timeline, item_limit, include_paths),
+        "media_pool": pool,
+        "limits": {
+            "item_limit_per_track_or_folder": item_limit,
+            "folder_depth": folder_depth,
+            "include_paths": include_paths,
+        },
+    }
+
+
+def search_registry(query: str, surface: str) -> Dict[str, Any]:
+    """Search tool and action names without dumping the full schemas/catalog."""
+    needle = query.casefold()
+    matches: List[Dict[str, Any]] = []
+    for candidate in _surfaces(surface):
+        for name in sorted(build_registry(candidate)):
+            actions = discover_actions(name) if candidate == "compound" else []
+            matched_actions = [action for action in actions if needle in action.casefold()]
+            if needle in name.casefold() or matched_actions:
+                row: Dict[str, Any] = {"name": name, "surface": candidate}
+                if matched_actions:
+                    row["matching_actions"] = matched_actions
+                matches.append(row)
+    return {"query": query, "matches": matches, "count": len(matches)}
 
 
 def _session_argv(request: Dict[str, Any], base_opts: Dict[str, Any]) -> List[str]:
@@ -1003,6 +1230,8 @@ def _session_argv(request: Dict[str, Any], base_opts: Dict[str, Any]) -> List[st
     prefix = ["--surface", base_opts["surface"], "--output", "jsonl"]
     if base_opts.get("yes"):
         prefix.append("--yes")
+    if base_opts.get("data_only"):
+        prefix.append("--data-only")
     return [*prefix, *result]
 
 
@@ -1043,6 +1272,8 @@ async def run_jsonl_session(
                 result = await _dispatch(rest, opts)
                 failed = result_is_error(result)
                 normalized_result = normalize(result)
+                if opts.get("data_only"):
+                    normalized_result = strip_operation_metadata(normalized_result)
                 if opts.get("raw_path") is not None:
                     normalized_result = _extract(normalized_result, opts["raw_path"])
                 payload = {
@@ -1075,8 +1306,16 @@ async def _dispatch(rest: List[str], opts: Dict[str, Any]) -> Any:
     if not rest or rest[0] in ("help", "--help", "-h"):
         return {"__help__": _usage()}
     command, tail = rest[0], rest[1:]
+    if tail and tail[0] in ("help", "--help", "-h") and command in ("inspect", "search", "tools"):
+        return {"__help__": _command_usage(command)}
     if command in ("version", "--version", "-v"):
         return VERSION
+    if command == "inspect":
+        return await inspect_live_project(parse_params(tail, opts["inputs"], opts["sets"]))
+    if command == "search":
+        if len(tail) != 1:
+            raise CliUsageError("search requires exactly one QUERY (quote phrases with spaces)")
+        return search_registry(tail[0], opts["surface"])
     if command == "__complete":
         return {"__candidates__": completion_candidates(tail)}
     if command == "session":
@@ -1137,7 +1376,7 @@ async def _dispatch(rest: List[str], opts: Dict[str, Any]) -> Any:
         return await read_registered_resource(surface, tail[0])
     if command == "completion":
         if len(tail) != 1:
-            raise CliUsageError("completion requires bash, zsh, or fish")
+            raise CliUsageError("completion requires bash, zsh, fish, or powershell")
         return {"__completion__": _completion(tail[0])}
 
     surface = opts["surface"]
@@ -1206,6 +1445,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return EXIT_OK
         if isinstance(result, dict) and result.get("__session__") is True:
             return EXIT_OK
+        if opts.get("data_only"):
+            result = strip_operation_metadata(result)
         emit(result, output=opts["output"], pretty=opts["pretty"], raw_path=opts["raw_path"])
         return EXIT_TOOL_ERROR if result_is_error(result) else EXIT_OK
     except (CliUsageError, ValidationError) as exc:

@@ -80,6 +80,17 @@ class OutputTests(unittest.TestCase):
         self.assertIn("PROJECT_NAME='My Film'", output)
         self.assertIn("ITEMS='[1,2]'", output)
 
+    def test_data_only_recursively_removes_operation_metadata(self):
+        value = {
+            "name": "Timeline 1",
+            "_operation": {"status": "success"},
+            "nested": [{"value": 1, "_operation": {"status": "success"}}],
+        }
+        self.assertEqual(
+            cli.strip_operation_metadata(value),
+            {"name": "Timeline 1", "nested": [{"value": 1}]},
+        )
+
 
 class DispatchTests(unittest.TestCase):
     def _main(self, argv):
@@ -100,6 +111,68 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(rc, cli.EXIT_USAGE)
         self.assertEqual(output, "")
         self.assertIn("unknown compound tool", error)
+
+    def test_tools_help_does_not_dump_the_catalog(self):
+        rc, output, error = self._main(["tools", "--help"])
+        self.assertEqual(rc, cli.EXIT_OK, error)
+        self.assertIn("prefer `dvr search QUERY`", output)
+        self.assertNotIn('"tools"', output)
+
+    def test_data_only_flag_removes_lifecycle_envelope(self):
+        mock = AsyncMock(return_value={"name": "Project", "_operation": {"status": "success"}})
+        with patch.object(cli, "call_registered_tool", mock):
+            rc, output, error = self._main([
+                "project_manager", "get_current", "--compact", "--data-only",
+            ])
+        self.assertEqual(rc, cli.EXIT_OK, error)
+        self.assertEqual(json.loads(output), {"name": "Project"})
+
+    def test_search_is_bounded_name_and_action_discovery(self):
+        result = cli.search_registry("timeline", "compound")
+        self.assertLess(len(json.dumps(result)), 20_000)
+        self.assertTrue(any(row["name"] == "timeline" for row in result["matches"]))
+
+    def test_inspect_builds_one_bounded_snapshot(self):
+        replies = {
+            ("resolve_control", "get_version"): {"product": "Resolve", "version_string": "21.1", "_operation": {}},
+            ("resolve_control", "runtime_mode"): {"running": True, "instances": 1, "_operation": {}},
+            ("resolve_control", "get_page"): {"page": "edit", "_operation": {}},
+            ("project_manager", "get_current"): {"name": "Demo", "id": "p1", "_operation": {}},
+            ("timeline", "list"): {"timelines": [{"name": "Main"}], "_operation": {}},
+            ("timeline", "probe_timeline_structure"): {
+                "name": "Main", "start_frame": 100, "end_frame": 200, "item_count": 2,
+                "tracks": {"video": {"track_count": 1, "tracks": [{
+                    "track_index": 1, "item_count": 1, "items": [{
+                        "name": "shot.mov", "media_pool_item_id": "m1", "media_status": "Online",
+                        "file_path": "C:/private/shot.mov",
+                    }],
+                }]}}, "markers": {}, "_operation": {},
+            },
+            ("media_pool", "probe_media_pool"): {
+                "root": {"name": "Master", "clips": [], "subfolders": []},
+                "current_folder": {"name": "Master"}, "selected_clips": [], "_operation": {},
+            },
+        }
+
+        async def fake_call(_surface, tool, arguments):
+            return replies[(tool, arguments["action"])]
+
+        with patch.object(cli, "call_registered_tool", side_effect=fake_call):
+            result = asyncio.run(cli.inspect_live_project({"item_limit": 10}))
+        self.assertEqual(result["resolve"]["page"], "edit")
+        self.assertEqual(result["project"]["name"], "Demo")
+        self.assertEqual(result["current_timeline"]["track_item_count"], 2)
+        self.assertEqual(result["current_timeline"]["unique_media_count"], 1)
+        self.assertEqual(result["resolve"]["ui_mode"], "unknown")
+        self.assertNotIn("file_path", result["current_timeline"]["tracks"]["video"]["tracks"][0]["items"][0])
+        self.assertNotIn("_operation", json.dumps(result))
+
+    def test_inspect_stops_when_resolve_is_not_running(self):
+        mock = AsyncMock(return_value={"running": False, "instances": 0})
+        with patch.object(cli, "call_registered_tool", mock):
+            result = asyncio.run(cli.inspect_live_project({}))
+        self.assertIn("error", result)
+        self.assertEqual(mock.await_count, 1)
 
     def test_tool_error_envelope_is_exit_one(self):
         rc, output, error = self._main(["knowledge", "not_an_action", "--compact"])

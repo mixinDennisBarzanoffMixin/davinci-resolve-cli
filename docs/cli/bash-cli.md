@@ -1,4 +1,4 @@
-# Bash-composable DaVinci Resolve CLI
+# Shell-composable DaVinci Resolve CLI
 
 `davinci-resolve`, `davinci-resolve-cli`, and `dvr` are equivalent command
 names. This guide uses `dvr` because it keeps pipelines readable.
@@ -38,6 +38,8 @@ settings, and the in-app bridge.
 ## Command grammar
 
 ```text
+dvr inspect [item_limit=N] [folder_depth=0..4] [include_paths=true] [full=true]
+dvr search QUERY [--surface compound|granular|all]
 dvr tools [--surface compound|granular|all]
 dvr describe TOOL [ACTION] [--surface compound|granular]
 dvr advanced describe TOOL
@@ -57,7 +59,7 @@ dvr setup [ARGS ...]
 dvr doctor [ARGS ...]
 dvr server [ARGS ...]
 dvr control-panel [ARGS ...]
-dvr completion <bash|zsh|fish>
+dvr completion <bash|zsh|fish|powershell>
 dvr session
 ```
 
@@ -80,8 +82,8 @@ dvr advanced drt parse drtPath=/path/to/timeline.drt
 Start with discovery instead of copying a possibly stale list from a document:
 
 ```bash
-dvr tools --surface compound
-dvr tools --surface granular | jq -r '.tools[].name'
+dvr inspect
+dvr search timeline
 dvr describe timeline
 dvr describe timeline get_items
 dvr actions timeline
@@ -90,6 +92,12 @@ dvr advanced actions project_read
 dvr prompts
 dvr resources
 ```
+
+`inspect` is the canonical bounded answer to “what is open?” It collects Resolve,
+project, current-timeline, track/item, marker, and Media Pool state in one warm
+process. Absolute media paths are omitted unless `include_paths=true` is passed.
+`search` finds tool/action names without dumping schemas. Use the full `tools`
+catalog only when bounded discovery cannot identify the surface.
 
 `prompts`/`prompt` and `resources`/`resource` expose the MCP prompt and resource
 catalogues without requiring an MCP host. Prompt arguments use the same
@@ -134,8 +142,9 @@ dvr render set_settings \
   video_quality=85
 ```
 
-Dotted keys build nested objects. Later command-line values override the same
-key from `--input`, which makes checked-in request files easy to specialize:
+Dotted keys build nested objects. Parameter layers are applied in this order:
+`--input`, then `--set`, then positional/flag parameters. Later layers override
+earlier ones regardless of token position, making request files easy to specialize:
 
 ```bash
 dvr media_analysis analyze_project \
@@ -154,6 +163,21 @@ jq -n --arg color Blue '{color: $color, include_hidden: false}' |
 Do not combine two stdin consumers. If a command needs media bytes or a second
 stream, put the request in a file and use `--input @request.json`.
 
+### PowerShell
+
+PowerShell can strip quotes from inline JSON at the native-command boundary.
+Prefer `key=value`, stdin, or a quoted `@file` token:
+
+```powershell
+$state = dvr --compact inspect | ConvertFrom-Json
+@{query='SaveProject'} | ConvertTo-Json -Compress |
+  dvr --compact resolve_control api_truth --input -
+dvr timeline get_items --input '@timeline query.json'
+```
+
+Use `ConvertFrom-Json` when `jq` is unavailable. `--output shell` emits POSIX
+assignments and is not sourceable PowerShell syntax.
+
 ## Output formats
 
 For universal tool calls, stdout is reserved for result data. Progress,
@@ -170,6 +194,7 @@ name. `dvr server` reserves stdout for MCP JSON-RPC.
 --output shell    shell-escaped KEY=value assignments
 --pretty          indent JSON (default on a terminal)
 --compact         compact JSON (default when redirected)
+--data-only       recursively omit _operation lifecycle metadata
 --raw PATH        extract a dotted result path before serialization
 ```
 
@@ -283,7 +308,10 @@ jq -c 'select(.ok == false)' responses.jsonl
 Responses contain `id`, `ok`, and either `result` or a structured `error` plus
 `exit_code`. A request cannot start another session or use `--input -`, because
 that would consume the protocol stream. Direct requests may set `yes:true` for
-the same exact-token confirmation replay used by ordinary `--yes` calls.
+the same exact-token confirmation replay used by ordinary `--yes` calls. Use
+redirected pipes/files rather than an interactive PTY, which can echo and wrap
+protocol text. The session process may exit 0 even when individual requests
+failed, so consumers must inspect every envelope's `ok` and `exit_code`.
 
 ## Exit codes and `set -e`
 
@@ -414,6 +442,11 @@ dvr completion zsh >~/.zfunc/_dvr
 
 # Fish
 dvr completion fish >~/.config/fish/completions/dvr.fish
+```
+
+```powershell
+# PowerShell, current session
+dvr completion powershell | Invoke-Expression
 ```
 
 Completion should remain side-effect free: it may enumerate static catalogues

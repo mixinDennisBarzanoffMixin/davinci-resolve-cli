@@ -1,79 +1,124 @@
 ---
 name: davinci-cli
-description: Use the dvr command-line interface to inspect or automate DaVinci Resolve, edit timelines, grade, manage media and projects, render, run durable batches, or work offline with .drp/.drt/.drx files. This fork is CLI-first; prefer dvr over its optional MCP compatibility transports.
+description: Use the dvr command-line interface to inspect or automate DaVinci Resolve, edit timelines, grade, manage media and projects, render, run durable batches, or work offline with .drp/.drt/.drx files. CLI-first; prefer dvr over optional MCP transports.
 ---
 
 # DaVinci Resolve CLI
 
-Use the user's CLI-first fork through the global `dvr` command. MCP is an
-optional transport over the same underlying handlers, not the primary agent
-interface. Prefer `dvr` because it is compact, shell-composable, discoverable,
-and produces machine-readable output without loading hundreds of MCP schemas.
+Use the global `dvr` command. It calls the same registered handlers as the MCP
+servers with much less schema overhead. Keep stdout machine-readable; diagnostics
+belong on stderr.
 
-## Start and discover
+## Fast path: what is open?
 
-For a lightweight read-only session check, use the exact commands below. Run
-`dvr doctor` only when connection or installation diagnosis is actually needed;
-its report is intentionally much more verbose.
+Start with one read-only, bounded snapshot of Resolve, the project, current
+timeline, tracks, clips, markers, and Media Pool:
+
+```text
+dvr --compact inspect
+```
+
+The default caps item samples at 10 per track/folder and Media Pool depth at 1.
+Adjust with `item_limit=N` and `folder_depth=0..4`. Use `full=true` only when an
+unbounded payload is needed. Absolute media paths are omitted by default; add
+`include_paths=true` only when path diagnosis is relevant.
+
+On an older build without `inspect`, use this staged fallback:
 
 ```text
 dvr --version
-dvr --compact resolve_control get_version
 dvr --compact resolve_control runtime_mode
+dvr --compact resolve_control get_version
+dvr --compact resolve_control get_page
 dvr --compact project_manager get_current
+dvr --compact timeline list
+dvr --compact timeline get_current
+dvr --compact media_pool probe_media_pool depth=1
+dvr --compact timeline probe_timeline_structure include_clip_properties=false
 ```
 
-Discover the installed build instead of guessing names or copying a stale
-catalog. Prefer targeted discovery; `dvr tools --surface all` is a broad catalog
-and should be used only when the relevant tool is genuinely unknown.
+Stop after a failed prerequisite. If no project/current timeline exists, report
+the state and listed candidates. Do not load or switch projects, databases,
+pages, or timelines merely to inspect them.
+
+`probe_timeline_structure` can be enormous and exposes absolute media paths.
+Narrow with `track_types`, or query one track with
+`timeline get_items track_type=video index=1`.
+
+## Cheap discovery
 
 ```text
-dvr actions TOOL
-dvr describe TOOL ACTION
-dvr advanced actions TOOL
-dvr prompts
-dvr resources
-dvr tools --surface all
+dvr search timeline
+dvr actions timeline
+dvr describe timeline probe_timeline_structure
+dvr advanced actions drp
 ```
 
-Use `dvr prompt NAME` and `dvr resource URI` when detailed workflow knowledge
-is needed. They expose the repository's maintained prompts and references
-without requiring the many per-domain skills to be globally installed.
+- `search` is bounded name/action discovery.
+- `actions TOOL` is for compound tools.
+- Run `describe TOOL ACTION` before an unfamiliar mutation.
+- Granular tools use `dvr describe TOOL --surface granular`.
+- `dvr tools --surface all` is a last resort; it is intentionally huge.
+- Use `dvr prompts` and `dvr prompt davinci_resolve_workflow` for maintained
+  workflow guidance; use `dvr prompt analyze_media` for analysis policy.
 
-## Choose the smallest CLI surface
+## Calls, inputs, and output
 
 | Need | Form |
 |---|---|
 | Guarded live workflow | `dvr TOOL ACTION key=value ...` |
-| One live Resolve API wrapper | `dvr granular TOOL key=value ...` |
+| One direct Resolve wrapper | `dvr granular TOOL key=value ...` |
 | Offline artifact/database work | `dvr advanced TOOL ACTION key=value ...` |
-| Durable analysis or project-spec job | `dvr batch ...` |
+| Durable job | `dvr batch ...` |
 | Product-video automation | `dvr production ...` |
 
-Pass complex requests with `--input JSON`, `--input @file`, or `--input -`.
-Use `--compact` for agent-readable JSON, `--raw PATH -o raw` for one scalar,
-and JSONL for streaming operations. Keep stdout as data; diagnostics belong on
-stderr.
+Prefer `key=value` for simple parameters. For structured payloads use
+`--input @file` or `--input -`; inline JSON quoting is shell-dependent.
+Inputs merge by layer, not token position: input files/stdin first, then `--set`,
+then positional/flag parameters. Later layers override earlier ones.
 
-## CLI versus MCP
+PowerShell rules:
 
-- `dvr` and the MCP servers call the same registered Python or Node handlers,
-  so validation, safety gates, and operation semantics stay aligned.
-- CLI is the default for Codex: fewer exposed schemas, easy discovery, shell
-  pipelines, durable batch execution, and precise JSON output.
-- Use MCP only when the user explicitly requests it, when the host must receive
-  MCP-native image/content blocks, or when no usable shell is available.
-- Do not start an MCP server merely to perform a command that `dvr` exposes.
+- Quote file tokens: `--input '@request.json'`.
+- Prefer `'JSON' | dvr TOOL ACTION --input -` for generated JSON.
+- Use `ConvertFrom-Json` when `jq` is absent; never assume either dependency.
+- `-o shell` is POSIX syntax and must not be sourced in PowerShell.
+- Install completion with the output of `dvr completion powershell`.
 
-## Safety and correctness
+Useful output controls:
 
-- Inspect before mutating and use the CLI's guarded compound surface unless a
-  granular or offline action is specifically needed.
-- Never modify, transcode, proxy, relink, or derive source media unless the user
-  explicitly asks. Put generated artifacts in a separate output location.
-- Before grading, inspect Resolve-rendered frames and preserve a recoverable
-  grade version.
-- Check the exact Resolve build with `resolve_control get_version`; API support
-  changes between patch releases.
-- A failed connection is a diagnosis task, not permission to restart, close,
-  or reconfigure Resolve.
+```text
+dvr --compact --data-only TOOL ACTION
+dvr --raw jobs.0.id TOOL ACTION
+```
+
+`--data-only` removes `_operation` envelopes recursively. `--raw PATH` already
+implies raw output. Trust exit status: 0 success, 1 tool error/refusal (including
+confirmation required), 2 usage/input, 3 internal/dependency, 130 interruption.
+
+For three or more reads not covered by `inspect`, use `dvr session` and JSONL.
+It keeps imports, registries, and the Resolve connection warm; repeated one-shot
+startup is much slower. Run sessions through redirected pipes, not an interactive
+PTY (which may echo/wrap protocol text). The session process can exit 0 even when
+individual requests fail; inspect every response envelope's `ok` and `exit_code`.
+
+## Visual inspection trap
+
+Media Pool thumbnails and `timeline thumbnail_contact_sheet` are source-derived,
+not proof of Fusion or grade output. Retrieval may require the Color page and may
+be unavailable on some builds. Do not change pages for a structural inspection.
+For a visual claim about a grade/Fusion result, use a Resolve-rendered frame or
+`gallery_stills grab_and_export` after the task authorizes that workflow.
+
+## Safety
+
+- Inspect before mutating; prefer guarded compound actions.
+- Never modify, transcode, proxy, relink, or derive source media unless explicitly
+  requested. Put generated artifacts in a separate output location.
+- Before grading, inspect Resolve-rendered frames and preserve a recoverable grade.
+- Check `resolve_control get_version`; API support changes between patch releases.
+- A failed connection does not authorize restarting, closing, or reconfiguring
+  Resolve. Run `dvr doctor` only for installation/connection diagnosis.
+- Resolve-target analysis normally persists results and writes project metadata/
+  markers. Host vision is incomplete until `media_analysis commit_vision`;
+  `pending_host_vision_analysis` is not success.

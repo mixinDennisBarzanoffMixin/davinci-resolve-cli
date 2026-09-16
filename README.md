@@ -11,7 +11,7 @@ English | [简体中文](README.zh-CN.md)
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-A complete, Bash-composable command-line environment for DaVinci Resolve. It
+A complete, shell-composable command-line environment for DaVinci Resolve. It
 exposes the upstream project's entire implementation directly: 37 guarded
 compound tools, 389 one-method granular tools, 19 offline advanced tools with
 168 actions, 14 prompts, and every concrete or templated resource. MCP remains
@@ -21,7 +21,7 @@ use Resolve automation from a terminal, script, cron job, or CI worker.
 This repository is a public, CLI-first fork of
 [samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp).
 It preserves the upstream MCP transports for compatibility, while making the
-`dvr` command and ordinary Bash pipelines the primary interface. Upstream
+`dvr` command and ordinary shell pipelines the primary interface. Upstream
 authorship and the MIT license are preserved in the repository history and
 license files.
 
@@ -57,7 +57,8 @@ Before connecting, open DaVinci Resolve Studio and set **Preferences > General >
 Discover and call the live and offline surfaces:
 
 ```bash
-dvr tools --surface all | jq '.count'       # 389 live tools
+dvr inspect                                 # bounded live-project snapshot
+dvr search timeline                         # bounded tool/action discovery
 dvr actions timeline
 dvr project_manager get_current --raw name
 dvr timeline get_items track_type=video index=1 | jq '.items'
@@ -65,6 +66,22 @@ dvr granular get_resolve_version_fields
 dvr advanced drx parse drxPath=/tmp/look.drx
 jq -n '{query:"SaveProject"}' | dvr resolve_control api_truth --input -
 ```
+
+PowerShell is first-class. Prefer native object conversion or stdin for complex
+JSON; quote `@file` tokens so PowerShell does not parse them as syntax:
+
+```powershell
+$state = dvr --compact inspect | ConvertFrom-Json
+$state.current_timeline.tracks.video
+@{query='SaveProject'} | ConvertTo-Json -Compress |
+  dvr --compact resolve_control api_truth --input -
+dvr timeline get_items --input '@timeline-query.json'
+dvr completion powershell | Invoke-Expression
+```
+
+Use `dvr tools --surface all` only when bounded `search`, `actions`, and
+`describe` discovery cannot identify the needed surface; the full catalog is
+large by design.
 
 Caption and transition workflows are first-class CLI actions:
 

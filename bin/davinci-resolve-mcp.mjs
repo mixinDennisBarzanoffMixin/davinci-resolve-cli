@@ -720,14 +720,20 @@ function commandCli(args) {
   if (args[0] === "__complete") {
     const python = venvPython(installRoot()) || findSupportedPython();
     const [command, ...commandArgs] = pythonCommandLine(python, ["-m", "src.cli", ...args]);
-    run(command, commandArgs, { cwd: PACKAGE_ROOT });
+    run(command, commandArgs, {
+      cwd: process.cwd(),
+      env: {...process.env, PYTHONPATH: [PACKAGE_ROOT, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter)},
+    });
     return;
   }
   const root = syncManagedInstall(installRoot());
   const python = venvPython(root) || findSupportedPython();
   maybeWarnAbiRisk(python);
   const [command, ...commandArgs] = pythonCommandLine(python, ["-m", "src.cli", ...args]);
-  run(command, commandArgs, { cwd: root });
+  run(command, commandArgs, {
+    cwd: process.cwd(),
+    env: {...process.env, PYTHONPATH: [root, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter)},
+  });
 }
 
 function commandAdvanced(args) {

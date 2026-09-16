@@ -128,9 +128,15 @@ class DynamicCompletionTests(unittest.TestCase):
     def test_shell_adapters_delegate_to_dynamic_endpoint(self):
         from src.cli import _completion
 
-        for shell in ("bash", "zsh", "fish"):
+        for shell in ("bash", "zsh", "fish", "powershell"):
             script = _completion(shell)
             self.assertIn("dvr __complete", script, shell)
+
+    def test_unknown_completion_shell_is_a_usage_error(self):
+        from src.cli import CliUsageError, _completion
+
+        with self.assertRaises(CliUsageError):
+            _completion("cmd")
 
     def test_launcher_completion_does_not_sync_or_create_managed_install(self):
         project_root = Path(__file__).resolve().parents[1]
