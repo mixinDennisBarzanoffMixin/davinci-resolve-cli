@@ -805,12 +805,12 @@ function main() {
       commandCli(args);
       return;
     }
-    if (cliEntry) {
-      commandCli(argv);
-      return;
-    }
     if (command === "sync") {
       commandSync(args);
+      return;
+    }
+    if (cliEntry) {
+      commandCli(argv);
       return;
     }
 
