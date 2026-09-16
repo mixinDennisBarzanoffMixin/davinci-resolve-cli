@@ -1,22 +1,23 @@
 ---
 name: resolve-mcp
-description: Orientation and index for DaVinci Resolve CLI and MCP work — inspecting sessions, grading, editing, conforming, delivery, media analysis, and .drp/.drt/.drx file work, live in a running Resolve or offline with none open. Load this when using the dvr command, the davinci-resolve MCP server, or several Resolve domains together. Per-domain skills carry the detailed workflows.
+description: Compatibility guide for using the DaVinci Resolve MCP transports directly. Apply only when MCP was explicitly requested or the dvr CLI cannot be used; ordinary Resolve automation should use the davinci-cli skill.
 ---
 
-# DaVinci Resolve MCP — Index
+# DaVinci Resolve MCP Compatibility — Index
 
 Orientation for any Resolve MCP task. This is the **map, not the depth** — each
 domain skill below carries its own routing and triggers on its own `description`.
 Open the one that matches, or use this when a task spans several domains. This
 skill does not auto-load the others; it points at them.
 
-## CLI and MCP are two front doors to the same implementation
+## The CLI is the primary interface
 
-- Prefer the registered `davinci-resolve` MCP tools when they are available in
-  the current Codex session; their schemas and safety annotations are already
-  exposed to the agent.
-- Use the global `dvr` command for shell composition, machine-readable output,
-  discovery, durable batches, and environments where MCP tools are not exposed.
+- For ordinary Codex work, load `davinci-cli` and use the global `dvr` command.
+- Use the registered `davinci-resolve` MCP tools only when the user explicitly
+  requests MCP, the shell is unavailable, or MCP-native content is required.
+- Both interfaces call the same implementation and preserve the same schemas,
+  validation, and safety rules; MCP is a compatibility transport, not a more
+  capable replacement for the CLI.
 - Do not guess tool/action names. Discover them with `dvr tools`,
   `dvr actions TOOL`, or `dvr describe TOOL` before constructing a new call.
 - Keep automation output machine-readable with `--compact` or JSON input via

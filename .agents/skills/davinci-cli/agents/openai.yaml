@@ -1,0 +1,6 @@
+interface:
+  display_name: "DaVinci Resolve CLI"
+  short_description: "Automate Resolve efficiently with the dvr CLI"
+  default_prompt: "Use $davinci-cli to inspect the current Resolve session with dvr and complete the requested workflow through the CLI."
+policy:
+  allow_implicit_invocation: true
