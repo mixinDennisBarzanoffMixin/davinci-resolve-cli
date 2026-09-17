@@ -200,6 +200,30 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(replay["params"]["confirm_token"], "token-1")
         self.assertEqual(replay["params"]["index"], 2)
 
+    def test_watch_annotations_once_emits_machine_readable_initial_event(self):
+        output = io.StringIO()
+        reply = {
+            "timeline": {"name": "Main"},
+            "annotation_count": 1,
+            "annotations": [{"id": "timeline:0:intro", "name": "intro"}],
+            "_operation": {"execution_id": "volatile"},
+        }
+        mock = AsyncMock(return_value=reply)
+
+        with patch.object(cli, "call_registered_tool", mock):
+            result = asyncio.run(cli.watch_annotations({"once": True}, output))
+
+        self.assertTrue(result["ok"])
+        event = json.loads(output.getvalue())
+        self.assertEqual(event["event"], "initial")
+        self.assertEqual(event["result"]["annotation_count"], 1)
+        self.assertNotIn("_operation", event["result"])
+        mock.assert_awaited_once_with(
+            "compound",
+            "timeline_markers",
+            {"action": "annotation_feed", "params": {"include_paths": False, "range_mode": "auto"}},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

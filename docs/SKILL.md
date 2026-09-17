@@ -1786,7 +1786,11 @@ Review Annotation kernel actions (v2.10.0+) add a unified review layer across
 timeline, timeline item, and media pool item scopes: `annotation_capabilities`,
 `probe_annotations`, `normalize_marker_payload`, `copy_annotations`,
 `move_annotations`, `sync_marker_custom_data`, `clear_annotations_by_scope`,
-`export_review_report`, and `annotation_boundary_report`. See
+`export_review_report`, `annotation_boundary_report`, and `annotation_feed`.
+`annotation_feed(range_mode="auto")` joins each timeline marker to the video
+item beneath it and treats one-frame markers as section boundaries through the
+next marker. For a live JSONL stream while an editor annotates, use
+`dvr watch annotations`. See
 `docs/kernels/review-annotation-kernel.md` for the live-tested scope and boundary map.
 
 For `add`, omit `frame`/`timecode` to create the marker at the current playhead.

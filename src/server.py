@@ -2404,6 +2404,7 @@ _ANNOTATION_KERNEL_ACTIONS = [
     "clear_annotations_by_scope",
     "export_review_report",
     "annotation_boundary_report",
+    "annotation_feed",
 ]
 
 
@@ -2657,6 +2658,149 @@ def _annotation_boundary_report(tl, p: Dict[str, Any]):
     return {
         "capabilities": _annotation_capabilities(),
         "annotations": _probe_annotations(tl, p),
+    }
+
+
+def _annotation_feed(tl, p: Dict[str, Any]):
+    """Normalize timeline markers into timestamped human shot annotations.
+
+    Resolve stores timeline marker keys relative to the timeline start while
+    TimelineItem ranges are absolute.  This read-only feed reports both spaces
+    and identifies every video item underneath each marker range so downstream
+    job pipelines do not have to repeat that error-prone join.
+    """
+    fps, fps_err = _timeline_fps(tl)
+    if fps_err:
+        return fps_err
+    try:
+        timeline_start = int(tl.GetStartFrame() or 0)
+        timeline_end = int(tl.GetEndFrame() or timeline_start)
+        start_timecode = tl.GetStartTimecode()
+        timeline_name = tl.GetName() or ""
+        timeline_id = tl.GetUniqueId()
+        raw_markers = tl.GetMarkers() or {}
+    except Exception as exc:
+        return _err(f"Failed to read timeline annotations: {exc}")
+
+    drop_frame = isinstance(start_timecode, str) and ";" in start_timecode
+    separator = ";" if drop_frame else ":"
+    include_paths = bool(p.get("include_paths", False))
+    video_items = []
+    try:
+        video_track_count = int(tl.GetTrackCount("video") or 0)
+    except Exception:
+        video_track_count = 0
+    for track_index in range(1, video_track_count + 1):
+        try:
+            items = tl.GetItemListInTrack("video", track_index) or []
+        except Exception:
+            items = []
+        for item_index, item in enumerate(items):
+            summary = _timeline_item_summary(item, ("video", track_index)) or {}
+            summary["item_index"] = item_index
+            if include_paths:
+                media_pool_item = _timeline_item_media_pool_item(item)
+                try:
+                    properties = media_pool_item.GetClipProperty("") if media_pool_item else {}
+                except Exception:
+                    properties = {}
+                if isinstance(properties, dict):
+                    summary["file_path"] = properties.get("File Path") or properties.get("FilePath")
+            video_items.append(summary)
+
+    range_mode = str(p.get("range_mode") or "auto").strip().lower()
+    if range_mode not in {"auto", "marker_duration", "next_marker"}:
+        return _err("annotation_feed range_mode must be auto, marker_duration, or next_marker")
+    annotations = []
+    sortable_markers = []
+    for raw_frame, data in raw_markers.items():
+        try:
+            relative_frame = int(round(float(raw_frame)))
+        except (TypeError, ValueError):
+            continue
+        sortable_markers.append((relative_frame, data if isinstance(data, dict) else {}))
+
+    sortable_markers.sort(key=lambda row: row[0])
+    for marker_index, (relative_frame, data) in enumerate(sortable_markers):
+        absolute_start = _marker_display_frame(tl, relative_frame)
+        try:
+            marker_duration_frames = max(1, int(round(float(data.get("duration", 1) or 1))))
+        except (TypeError, ValueError):
+            marker_duration_frames = 1
+        next_absolute_start = None
+        if marker_index + 1 < len(sortable_markers):
+            next_absolute_start = _marker_display_frame(tl, sortable_markers[marker_index + 1][0])
+        infer_to_boundary = range_mode == "next_marker" or (
+            range_mode == "auto" and marker_duration_frames <= 1
+        )
+        if infer_to_boundary:
+            absolute_end = next_absolute_start if next_absolute_start is not None else timeline_end
+            range_source = "next_marker_boundary" if next_absolute_start is not None else "timeline_end"
+        else:
+            absolute_end = absolute_start + marker_duration_frames
+            range_source = "marker_duration"
+        absolute_end = min(timeline_end, absolute_end)
+        if absolute_end <= absolute_start:
+            absolute_end = absolute_start + 1
+        overlaps = []
+        for item in video_items:
+            item_start = item.get("start")
+            item_end = item.get("end")
+            if item_start is None or item_end is None:
+                continue
+            overlap_start = max(int(item_start), absolute_start)
+            overlap_end = min(int(item_end), absolute_end)
+            if overlap_start >= overlap_end:
+                continue
+            row = dict(item)
+            row["overlap_start_frame"] = overlap_start
+            row["overlap_end_frame"] = overlap_end
+            row["overlap_seconds"] = round((overlap_end - overlap_start) / fps, 3)
+            overlaps.append(row)
+        custom_data = data.get("customData") or data.get("custom_data") or ""
+        annotations.append({
+            "id": f"timeline:{relative_frame}:{custom_data or data.get('name') or 'marker'}",
+            "scope": "timeline",
+            "frame": relative_frame,
+            "absolute_start_frame": absolute_start,
+            "absolute_end_frame": absolute_end,
+            "start_seconds": round((absolute_start - timeline_start) / fps, 3),
+            "end_seconds": round((absolute_end - timeline_start) / fps, 3),
+            "start_timecode": _frame_id_to_timecode(
+                absolute_start, fps, separator=separator, drop_frame=drop_frame
+            ),
+            "end_timecode": _frame_id_to_timecode(
+                absolute_end, fps, separator=separator, drop_frame=drop_frame
+            ),
+            "marker_duration_frames": marker_duration_frames,
+            "duration_frames": absolute_end - absolute_start,
+            "duration_seconds": round((absolute_end - absolute_start) / fps, 3),
+            "range_source": range_source,
+            "color": data.get("color") or "",
+            "name": data.get("name") or "",
+            "note": data.get("note") or "",
+            "custom_data": custom_data,
+            "video_items": overlaps,
+        })
+    return {
+        "timeline": {
+            "name": timeline_name,
+            "id": timeline_id,
+            "fps": fps,
+            "start_frame": timeline_start,
+            "end_frame": timeline_end,
+            "start_timecode": start_timecode,
+        },
+        "annotation_count": len(annotations),
+        "annotations": annotations,
+        "annotation_contract": {
+            "recommended_scope": "timeline markers",
+            "marker_name": "short shot label, for example exterior_front_left",
+            "marker_note": "free-form detail, quality, problem, or instruction",
+            "marker_duration": "explicit section length; in auto mode a one-frame point runs until the next marker",
+            "marker_color": "optional category chosen by the production team",
+            "range_mode": range_mode,
+        },
     }
 
 def _check():
@@ -26761,6 +26905,7 @@ def timeline_markers(action: str, params: Optional[Dict[str, Any]] = None) -> An
       clear_annotations_by_scope(scope?, color?, custom_data?, all?, clear_flags?, clear_clip_color?) -> {success}
       export_review_report(scope?, include_capabilities?) -> {title, annotations, capabilities?}
       annotation_boundary_report(scope?) -> {capabilities, annotations}
+      annotation_feed(include_paths?, range_mode=auto|marker_duration|next_marker) -> normalized timeline-marker ranges joined to video items
     """
     p = _params(params)
     _, tl, err = _get_tl()
@@ -26864,6 +27009,8 @@ def timeline_markers(action: str, params: Optional[Dict[str, Any]] = None) -> An
         return _export_review_report(tl, p)
     elif action == "annotation_boundary_report":
         return _annotation_boundary_report(tl, p)
+    elif action == "annotation_feed":
+        return _annotation_feed(tl, p)
     return _unknown(action, ["add","get_all","get_by_custom_data","update_custom_data","get_custom_data","delete_by_color","delete_at_frame","delete_by_custom_data","get_current_timecode","set_current_timecode","get_current_video_item","get_thumbnail","get_thumbnail_image",*_ANNOTATION_KERNEL_ACTIONS])
 
 

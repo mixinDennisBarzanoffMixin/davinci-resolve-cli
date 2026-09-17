@@ -94,6 +94,44 @@ class FiveArgMarkerStub:
         return True
 
 
+class AnnotationItemStub:
+    def __init__(self, start, end, name="camera.mov", item_id="item-1"):
+        self.start = start
+        self.end = end
+        self.name = name
+        self.item_id = item_id
+
+    def GetStart(self): return self.start
+    def GetEnd(self): return self.end
+    def GetDuration(self): return self.end - self.start
+    def GetLeftOffset(self): return 0
+    def GetMediaPoolItem(self): return None
+    def GetUniqueId(self): return self.item_id
+    def GetName(self): return self.name
+
+
+class AnnotationTimelineStub(TimelineStub):
+    def __init__(self):
+        super().__init__()
+        self.items = [AnnotationItemStub(86400, 86520)]
+
+    def GetEndFrame(self): return 86640
+    def GetName(self): return "Human annotations"
+    def GetUniqueId(self): return "timeline-1"
+    def GetTrackCount(self, track_type): return 1 if track_type == "video" else 0
+    def GetItemListInTrack(self, track_type, track_index): return self.items
+    def GetMarkers(self):
+        return {
+            24: {
+                "color": "Green",
+                "name": "exterior_front_left",
+                "note": "camera rotates around the headlight",
+                "duration": 48,
+                "customData": "human-shot-1",
+            }
+        }
+
+
 class TimelineMarkerParamTest(unittest.TestCase):
     def setUp(self):
         self.original_get_tl = compound._get_tl
@@ -370,6 +408,38 @@ class TimelineMarkerParamTest(unittest.TestCase):
 
         self.assertEqual(out, {"success": True, "frame": 12})
         self.assertEqual(target.add_calls, [(12, "Blue", "Fallback", "", 1)])
+
+    def test_annotation_feed_normalizes_range_and_joins_underlying_video(self):
+        timeline = AnnotationTimelineStub()
+
+        out = compound._annotation_feed(timeline, {})
+
+        self.assertEqual(out["annotation_count"], 1)
+        marker = out["annotations"][0]
+        self.assertEqual(marker["start_seconds"], 1.0)
+        self.assertEqual(marker["end_seconds"], 3.0)
+        self.assertEqual(marker["start_timecode"], "01:00:01:00")
+        self.assertEqual(marker["end_timecode"], "01:00:03:00")
+        self.assertEqual(marker["name"], "exterior_front_left")
+        self.assertEqual(marker["custom_data"], "human-shot-1")
+        self.assertEqual(marker["video_items"][0]["timeline_item_id"], "item-1")
+        self.assertEqual(marker["video_items"][0]["overlap_seconds"], 2.0)
+
+    def test_annotation_feed_treats_point_markers_as_section_boundaries(self):
+        timeline = AnnotationTimelineStub()
+        timeline.GetMarkers = lambda: {
+            24: {"name": "front", "duration": 1},
+            54: {"name": "interior", "duration": 1},
+        }
+
+        out = compound._annotation_feed(timeline, {"range_mode": "auto"})
+
+        first, second = out["annotations"]
+        self.assertEqual(first["start_seconds"], 1.0)
+        self.assertEqual(first["end_seconds"], 2.25)
+        self.assertEqual(first["range_source"], "next_marker_boundary")
+        self.assertEqual(second["end_seconds"], 10.0)
+        self.assertEqual(second["range_source"], "timeline_end")
 
 
 if __name__ == "__main__":

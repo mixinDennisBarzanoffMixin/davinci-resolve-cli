@@ -31,6 +31,7 @@ All actions are exposed through `timeline_markers`.
 | `copy_annotations` | Copy markers between annotation scopes, optionally carrying flags and clip color. |
 | `move_annotations` | Copy markers, then clear source markers when the source exposes marker deletion. |
 | `sync_marker_custom_data` | Update marker custom data for timeline, timeline item, or media pool item scope. |
+| `annotation_feed` | Read timeline markers as normalized time ranges and join each range to the video item underneath it. `range_mode=auto` treats point markers as section boundaries through the next marker. |
 | `clear_annotations_by_scope` | Clear markers by color/custom data and optionally clear flags and clip color. |
 | `export_review_report` | Return a read-only annotation report with optional capability metadata. |
 | `annotation_boundary_report` | Return capabilities plus a live annotation snapshot. |
@@ -42,6 +43,26 @@ All actions are exposed through `timeline_markers`.
 | `timeline` | Supported | Supported | Not exposed | Not exposed | Timeline frame id or timeline timecode. |
 | `timeline_item` | Supported | Supported | Supported | Supported | Timeline item marker frames. |
 | `media_pool_item` | Supported | Supported | Supported | Supported | Source/media pool item frames. |
+
+## Live human annotation feed
+
+Use timeline markers for human shot logging. The marker name is the concise
+section label and the note carries visible detail, movement, quality problems,
+or editorial intent.
+
+```text
+dvr timeline_markers annotation_feed range_mode=auto
+dvr watch annotations interval_seconds=1
+```
+
+The feed returns elapsed seconds, absolute timecode, marker color/name/note,
+range provenance, and the video timeline item under each range. In `auto` mode,
+a one-frame point marker spans through the next marker (the final marker spans
+to timeline end); a marker with an explicit duration retains that duration.
+Use `range_mode=marker_duration` when point markers must remain points.
+
+`dvr watch annotations` polls the same read-only feed and emits JSONL only when
+the marker set changes. Redirect stdout to retain an annotation event log.
 
 ## Marker Payloads
 

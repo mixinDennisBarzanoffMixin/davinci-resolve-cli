@@ -9,14 +9,17 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import hashlib
 import inspect
 import json
 import os
 import re
 import shlex
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TextIO
 
@@ -772,6 +775,7 @@ Usage:
   dvr resources | resource URI
   dvr completion bash|zsh|fish|powershell
   dvr session                              persistent JSONL request loop
+  dvr watch annotations [PARAM ...]        stream changed timeline annotations as JSONL
 
 Parameters:
   key=value              JSON scalars/objects/arrays are decoded
@@ -806,7 +810,7 @@ Exit codes: 0 success, 1 tool error/refusal, 2 usage/input, 3 internal, 130 inte
 
 _TOP_LEVEL_COMMANDS = (
     "inspect", "search", "tools", "describe", "actions", "call", "granular", "prompts", "prompt",
-    "resources", "resource", "completion", "session", "advanced", "batch", "production",
+    "resources", "resource", "completion", "session", "watch", "advanced", "batch", "production",
     "setup", "doctor", "server", "control-panel", "help", "version",
 )
 _COMMON_PARAMETER_FLAGS = (
@@ -918,6 +922,14 @@ def completion_candidates(words: List[str]) -> List[str]:
                 candidates = [*_COMMON_PARAMETER_FLAGS, *_schema_flags(getattr(tool, "parameters", None))]
         elif command == "completion":
             candidates = ["bash", "zsh", "fish", "powershell"]
+        elif command == "watch":
+            if len(complete) == 1:
+                candidates = ["annotations"]
+            else:
+                candidates = [
+                    "interval_seconds=", "timeout_seconds=", "max_events=",
+                    "emit_initial=", "include_paths=", "range_mode=", "once=",
+                ]
         elif command == "production":
             if len(complete) == 1:
                 candidates = [
@@ -999,6 +1011,8 @@ def _command_usage(command: str) -> str:
                   "Searches tool and action names without printing the full tool catalog.\n",
         "tools": "Usage: dvr tools [--surface compound|granular|all]\n"
                  "Prints the complete tool catalog; prefer `dvr search QUERY` for bounded discovery.\n",
+        "watch": "Usage: dvr watch annotations [interval_seconds=1] [timeout_seconds=0] [max_events=0] [range_mode=auto] [include_paths=false]\n"
+                 "Streams one JSON object per changed annotation snapshot until interrupted.\n",
     }
     return rows.get(command, _usage())
 
@@ -1302,11 +1316,85 @@ async def run_jsonl_session(
             return
 
 
+def _watch_number(params: Dict[str, Any], key: str, default: float, *, minimum: float = 0.0) -> float:
+    value = params.get(key, default)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise CliUsageError(f"watch {key} must be a number")
+    if number < minimum:
+        raise CliUsageError(f"watch {key} must be at least {minimum}")
+    return number
+
+
+async def watch_annotations(
+    params: Dict[str, Any], output_stream: Optional[TextIO] = None
+) -> Dict[str, Any]:
+    """Poll the current timeline and emit JSONL only when annotations change."""
+    output_stream = output_stream or sys.stdout
+    interval = _watch_number(params, "interval_seconds", 1.0, minimum=0.1)
+    timeout = _watch_number(params, "timeout_seconds", 0.0)
+    try:
+        max_events = int(params.get("max_events", 0) or 0)
+    except (TypeError, ValueError):
+        raise CliUsageError("watch max_events must be an integer")
+    if max_events < 0:
+        raise CliUsageError("watch max_events must be at least 0")
+    once = bool(params.get("once", False))
+    emit_initial = bool(params.get("emit_initial", True))
+    feed_params = {
+        "include_paths": bool(params.get("include_paths", False)),
+        "range_mode": params.get("range_mode", "auto"),
+    }
+    started = time.monotonic()
+    previous_fingerprint: Optional[str] = None
+    emitted = 0
+    polls = 0
+
+    while True:
+        result = await call_registered_tool(
+            "compound",
+            "timeline_markers",
+            {"action": "annotation_feed", "params": feed_params},
+        )
+        normalized = strip_operation_metadata(normalize(result))
+        if result_is_error(normalized):
+            event = {
+                "event": "error",
+                "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "result": normalized,
+            }
+            output_stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+            output_stream.flush()
+            return {"__watch__": True, "ok": False, "events": emitted, "polls": polls + 1}
+        polls += 1
+        canonical = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        changed = previous_fingerprint is not None and fingerprint != previous_fingerprint
+        should_emit = (previous_fingerprint is None and emit_initial) or changed
+        if should_emit:
+            emitted += 1
+            event = {
+                "event": "initial" if previous_fingerprint is None else "changed",
+                "sequence": emitted,
+                "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "fingerprint": fingerprint,
+                "result": normalized,
+            }
+            output_stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+            output_stream.flush()
+        previous_fingerprint = fingerprint
+        elapsed = time.monotonic() - started
+        if once or (max_events and emitted >= max_events) or (timeout and elapsed >= timeout):
+            return {"__watch__": True, "ok": True, "events": emitted, "polls": polls}
+        await asyncio.sleep(interval)
+
+
 async def _dispatch(rest: List[str], opts: Dict[str, Any]) -> Any:
     if not rest or rest[0] in ("help", "--help", "-h"):
         return {"__help__": _usage()}
     command, tail = rest[0], rest[1:]
-    if tail and tail[0] in ("help", "--help", "-h") and command in ("inspect", "search", "tools"):
+    if tail and tail[0] in ("help", "--help", "-h") and command in ("inspect", "search", "tools", "watch"):
         return {"__help__": _command_usage(command)}
     if command in ("version", "--version", "-v"):
         return VERSION
@@ -1323,6 +1411,11 @@ async def _dispatch(rest: List[str], opts: Dict[str, Any]) -> Any:
             raise CliUsageError("session takes no positional arguments; send JSONL requests on stdin")
         await run_jsonl_session(sys.stdin, sys.stdout, opts)
         return {"__session__": True}
+    if command == "watch":
+        if not tail or tail[0] != "annotations":
+            raise CliUsageError("watch currently requires the 'annotations' target")
+        params = parse_params(tail[1:], opts["inputs"], opts["sets"])
+        return await watch_annotations(params)
     if command == "tools":
         rows = [row for surface in _surfaces(opts["surface"]) for row in list_tools(surface)]
         return {"tools": rows, "count": len(rows)}
@@ -1445,6 +1538,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return EXIT_OK
         if isinstance(result, dict) and result.get("__session__") is True:
             return EXIT_OK
+        if isinstance(result, dict) and result.get("__watch__") is True:
+            return EXIT_OK if result.get("ok", True) else EXIT_TOOL_ERROR
         if opts.get("data_only"):
             result = strip_operation_metadata(result)
         emit(result, output=opts["output"], pretty=opts["pretty"], raw_path=opts["raw_path"])
