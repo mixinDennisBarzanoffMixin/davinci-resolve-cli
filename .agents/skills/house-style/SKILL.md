@@ -55,7 +55,11 @@ _Not yet captured._
 
 <!-- How a piece starts, what the first frames have to do, how it lands. -->
 
-_Not yet captured._
+- Use the canonical Talisman-style CarsBG title card without a vehicle photo:
+  brand header, make/model text, clean black/red treatment, then cut straight
+  to a clear vehicle exterior. The title must identify the car, but the car
+  itself belongs in the next shot. The trap is forcing the vehicle into the
+  title card and diluting the established Talisman design.
 
 ## Rejected by default
 
@@ -69,11 +73,26 @@ thrown away:
 - Music beds
 - Grading on a cut that was asked for as an assembly
 
+## Music when explicitly requested
+
+- Use a clean, natural instrumental bed with an intelligible arrangement and
+  stable dynamics; avoid electronic/synthwave, glitch, breakbeat, aggressive
+  bass, and heavily processed textures. The music must sound clear on ordinary
+  phone speakers rather than compete with the car edit. The trap is choosing
+  “automotive” electronic music that is technically valid but sonically busy
+  or unclear.
+
 ## Delivery conventions
 
 <!-- Aspect ratios, timeline naming, versioning, where renders go. -->
 
-_Not yet captured._
+- Keep all normal editorial, audio, title, VFX, and finishing work in the
+  user's active timeline. Do not create, duplicate, version, or archive
+  timelines as a safety mechanism: the user wants to use Resolve's Undo
+  (`Ctrl+Z`) for reversals. Create a new timeline only when the user explicitly
+  asks for a separate timeline, version, or variant. The trap is treating
+  non-destructive versions as harmless housekeeping; they clutter the project
+  and make the user's intended working cut unclear.
 
 ---
 
